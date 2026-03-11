@@ -5,15 +5,26 @@ Bluebook Manager — Configuration & Constants
 import os
 import sys
 
-# Base directory: use the directory where main.py lives
-BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+# When running as a PyInstaller bundle, bundled data (templates, QSS) are in
+# sys._MEIPASS, while user data (database, storage, logs) should be next to
+# the .exe.  When running from source, both are the project root.
+if getattr(sys, 'frozen', False):
+    # Frozen exe: bundled assets extracted here
+    BUNDLE_DIR = sys._MEIPASS
+    # Persistent / user data lives next to the exe
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = BUNDLE_DIR
 
-# Paths
+# Paths — user / runtime data (persist next to exe)
 STORAGE_ROOT = os.path.join(BASE_DIR, "storage")
 DB_PATH = os.path.join(BASE_DIR, "data", "bluebook.db")
-TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "bluebook_manager.log")
+
+# Paths — bundled assets (inside the exe payload)
+TEMPLATE_DIR = os.path.join(BUNDLE_DIR, "templates")
 
 # Section type constants (order matters for printing)
 SECTION_TYPES = [
@@ -56,9 +67,9 @@ SECTION_FILE_TYPES = {
     "cover": [".docx"],
     "master_drawings": [".pdf"],
     "qc_drawings": [".pdf"],
-    "approval": [".pdf"],
+    "approval": [".pdf", ".docx"],
     "quality_alerts": [".docx"],
-    "quality_notes": [".docx"],
+    "quality_notes": [".docx", ".pdf"],
     "packing_instruction": [".docx", ".jpg", ".png", ".jpeg", ".pdf"],
     "fit_and_functions": [".docx"],
 }
@@ -67,7 +78,7 @@ SECTION_FILE_TYPES = {
 TEMPLATE_SECTIONS = ["cover", "quality_alerts", "quality_notes", "packing_instruction", "fit_and_functions"]
 
 # Sections that support sharing
-SHAREABLE_SECTIONS = ["quality_alerts", "quality_notes", "fit_and_functions"]
+SHAREABLE_SECTIONS = ["quality_alerts", "quality_notes", "fit_and_functions", "packing_instruction"]
 
 # Max files per section (0 = unlimited, but practically limited)
 SECTION_MAX_FILES = {

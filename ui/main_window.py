@@ -373,32 +373,50 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", str(e))
 
     def _delete_bluebook(self):
-        row = self.bluebook_table.currentRow()
-        if row < 0:
+        # Collect unique selected bluebook IDs
+        selected_rows = set()
+        for item in self.bluebook_table.selectedItems():
+            selected_rows.add(item.row())
+
+        if not selected_rows:
             QMessageBox.information(self, "No Selection",
                                     "Please select a bluebook to delete.")
             return
 
-        bb_id = self.bluebook_table.item(row, 0).data(Qt.UserRole)
-        bb = bluebook_service.get_bluebook(bb_id)
-        if not bb:
+        bb_list = []
+        for row in sorted(selected_rows):
+            bb_id = self.bluebook_table.item(row, 0).data(Qt.UserRole)
+            bb = bluebook_service.get_bluebook(bb_id)
+            if bb:
+                bb_list.append(bb)
+
+        if not bb_list:
             return
 
         # Require password for deletion
         from services.security import require_password
-        if not require_password("Deleting a bluebook", self):
+        if not require_password("Deleting bluebook(s)", self):
             return
+
+        die_nums = ", ".join(bb.die_number for bb in bb_list)
+        if len(bb_list) == 1:
+            msg = (f"Delete Bluebook Die# {die_nums}?\n\n"
+                   f"This will remove the database record and all associated files.")
+        else:
+            msg = (f"Delete {len(bb_list)} bluebooks?\n\n"
+                   f"Die#: {die_nums}\n\n"
+                   f"This will remove all database records and associated files.")
 
         reply = QMessageBox.question(
             self, "Delete Bluebook",
-            f"Delete Bluebook Die# {bb.die_number}?\n\n"
-            f"This will remove the database record and all associated files.",
+            msg,
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            bluebook_service.delete_bluebook(bb_id, delete_files=True)
+            for bb in bb_list:
+                bluebook_service.delete_bluebook(bb.id, delete_files=True)
             self._load_bluebooks()
-            self.statusBar().showMessage(f"Deleted Bluebook Die# {bb.die_number}")
+            self.statusBar().showMessage(f"Deleted {len(bb_list)} bluebook(s): {die_nums}")
 
     def _on_table_context_menu(self, pos):
         """Show context menu on right-click in the bluebook table."""
@@ -425,6 +443,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         open_action = menu.addAction("📂  Open Bluebook")
         desc_action = menu.addAction("✏️  Change Description")
+        menu.addSeparator()
+        delete_action = menu.addAction("🗑️  Delete Bluebook")
 
         action = menu.exec(self.bluebook_table.viewport().mapToGlobal(pos))
         if not action:
@@ -438,6 +458,8 @@ class MainWindow(QMainWindow):
             self._show_detail(bb.id)
         elif action == desc_action:
             self._change_description(bb)
+        elif action == delete_action:
+            self._delete_bluebook()
 
     def _add_customer_to_bluebook(self, bb):
         """Show a list of customers to add to this bluebook."""

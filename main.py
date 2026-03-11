@@ -13,14 +13,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QFile, QTextStream
 
-from config import BASE_DIR
+from config import BUNDLE_DIR
 from dal.database import init_db
 from services.log_service import setup_logging
 
 
 def load_stylesheet(app: QApplication):
     """Load the QSS stylesheet."""
-    qss_path = os.path.join(BASE_DIR, "ui", "resources", "styles.qss")
+    qss_path = os.path.join(BUNDLE_DIR, "ui", "resources", "styles.qss")
     if os.path.isfile(qss_path):
         with open(qss_path, "r") as f:
             app.setStyleSheet(f.read())
