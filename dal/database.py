@@ -45,6 +45,19 @@ def init_db():
             PRIMARY KEY (customer_id, bluebook_id)
         );
 
+        CREATE TABLE IF NOT EXISTS outsources (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL UNIQUE,
+            contact_info  TEXT,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS outsource_bluebooks (
+            outsource_id  INTEGER REFERENCES outsources(id) ON DELETE CASCADE,
+            bluebook_id   INTEGER REFERENCES bluebooks(id) ON DELETE CASCADE,
+            PRIMARY KEY (outsource_id, bluebook_id)
+        );
+
         CREATE TABLE IF NOT EXISTS bluebook_files (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             bluebook_id   INTEGER REFERENCES bluebooks(id) ON DELETE CASCADE,
@@ -86,6 +99,8 @@ def init_db():
             ON shared_files_map(original_file_id);
         CREATE INDEX IF NOT EXISTS idx_shared_files_linked
             ON shared_files_map(linked_bluebook_id);
+        CREATE INDEX IF NOT EXISTS idx_outsource_bluebooks_bluebook
+            ON outsource_bluebooks(bluebook_id);
     """)
 
     conn.commit()

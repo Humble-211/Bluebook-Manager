@@ -18,6 +18,14 @@ class Customer:
 
 
 @dataclass
+class Outsource:
+    id: Optional[int] = None
+    name: str = ""
+    contact_info: str = ""
+    created_at: Optional[datetime] = None
+
+
+@dataclass
 class Bluebook:
     id: Optional[int] = None
     die_number: str = ""
@@ -26,6 +34,7 @@ class Bluebook:
     updated_at: Optional[datetime] = None
     # Populated by queries — not stored directly
     customer_names: list[str] = field(default_factory=list)
+    outsource_names: list[str] = field(default_factory=list)
 
 
 @dataclass

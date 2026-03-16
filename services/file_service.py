@@ -370,3 +370,5 @@ def get_files_for_section(bluebook_id: int, section_type: str) -> list[BluebookF
 def get_all_files(bluebook_id: int) -> list[BluebookFile]:
     """Get all files for a bluebook."""
     return dal.get_files_for_bluebook(bluebook_id)
+
+

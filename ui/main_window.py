@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QMimeData, QByteArray
 
 from config import SECTION_LABELS
-from services import bluebook_service, customer_service
+from services import bluebook_service, customer_service, outsource_service
 from ui.bluebook_detail import BluebookDetailWidget
 from ui.customer_panel import CustomerPanel
 
@@ -115,6 +115,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.statusBar().showMessage("Search or select a customer to view bluebooks")
 
+        # Hidden console toggle shortcut
+        from PySide6.QtGui import QShortcut, QKeySequence
+        self.console_shortcut = QShortcut(QKeySequence("Ctrl+Shift+9"), self)
+        self.console_shortcut.activated.connect(self._toggle_console)
+
     def _build_ui(self):
         # Central stacked widget (main screen vs detail screen)
         self.stack = QStackedWidget()
@@ -167,9 +172,9 @@ class MainWindow(QMainWindow):
 
         # Bluebook table
         self.bluebook_table = BluebookTable()
-        self.bluebook_table.setColumnCount(4)
+        self.bluebook_table.setColumnCount(5)
         self.bluebook_table.setHorizontalHeaderLabels(
-            ["Die Number", "Description", "Customers", "Files"])
+            ["Die Number", "Description", "Customers", "Outsource", "Files"])
         self.bluebook_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents)
         self.bluebook_table.horizontalHeader().setSectionResizeMode(
@@ -177,7 +182,9 @@ class MainWindow(QMainWindow):
         self.bluebook_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.Stretch)
         self.bluebook_table.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeToContents)
+            3, QHeaderView.Stretch)
+        self.bluebook_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeToContents)
         self.bluebook_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.bluebook_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.bluebook_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -289,7 +296,9 @@ class MainWindow(QMainWindow):
             self.bluebook_table.setItem(
                 row, 2, QTableWidgetItem(", ".join(bb.customer_names)))
             self.bluebook_table.setItem(
-                row, 3, QTableWidgetItem(str(file_counts.get(bb.id, 0))))
+                row, 3, QTableWidgetItem(", ".join(bb.outsource_names)))
+            self.bluebook_table.setItem(
+                row, 4, QTableWidgetItem(str(file_counts.get(bb.id, 0))))
 
             # Store bluebook id
             self.bluebook_table.item(row, 0).setData(Qt.UserRole, bb.id)
@@ -351,6 +360,28 @@ class MainWindow(QMainWindow):
             self.stack.removeWidget(w)
             w.deleteLater()
 
+    def _toggle_console(self):
+        """Toggle the visibility of the Windows console (Windows only)."""
+        import sys
+        if sys.platform != "win32":
+            return
+            
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32 = ctypes.windll.user32
+            # Toggle visibility
+            if user32.IsWindowVisible(hwnd):
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            else:
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+        else:
+            # Allocate a new console if one doesn't exist
+            kernel32.AllocConsole()
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+
     def _create_bluebook(self):
         die, ok = QInputDialog.getText(self, "New Bluebook", "Die Number:")
         if not ok or not die.strip():
@@ -367,8 +398,25 @@ class MainWindow(QMainWindow):
             if self.current_customer_id:
                 customer_service.link_bluebook(self.current_customer_id, bb.id)
 
+            # Call standalone script to auto-link files in the background
+            import subprocess
+            import sys
+            import os
+            
+            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "auto_link_files.py")
+            script_path = os.path.normpath(script_path)
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            
+            # If frozen via PyInstaller, use 'python' assuming it's on PATH, otherwise use sys.executable
+            python_exe = "python" if getattr(sys, "frozen", False) else sys.executable
+            
+            try:
+                subprocess.Popen([python_exe, script_path, bb.die_number], creationflags=flags)
+            except Exception as e:
+                print(f"Subprocess launch failed: {e}")
+
             self._load_bluebooks()
-            self.statusBar().showMessage(f"Created Bluebook Die# {bb.die_number}")
+            self.statusBar().showMessage(f"Created Bluebook Die# {bb.die_number}. Auto-linking files in background...")
         except Exception as e:
             QMessageBox.warning(self, "Error", str(e))
 
@@ -441,6 +489,15 @@ class MainWindow(QMainWindow):
             remove_action = menu.addAction("➖  Remove Customer from this Bluebook")
 
         menu.addSeparator()
+
+        # Outsource actions
+        add_outsource_action = menu.addAction("➕  Add Outsource to this Bluebook")
+        remove_outsource_action = None
+
+        if bb.outsource_names:
+            remove_outsource_action = menu.addAction("➖  Remove Outsource from this Bluebook")
+
+        menu.addSeparator()
         open_action = menu.addAction("📂  Open Bluebook")
         desc_action = menu.addAction("✏️  Change Description")
         menu.addSeparator()
@@ -454,6 +511,10 @@ class MainWindow(QMainWindow):
             self._add_customer_to_bluebook(bb)
         elif action == remove_action:
             self._remove_customer_from_bluebook(bb)
+        elif action == add_outsource_action:
+            self._add_outsource_to_bluebook(bb)
+        elif action == remove_outsource_action:
+            self._remove_outsource_from_bluebook(bb)
         elif action == open_action:
             self._show_detail(bb.id)
         elif action == desc_action:
@@ -525,6 +586,81 @@ class MainWindow(QMainWindow):
             self._load_bluebooks()
             self.statusBar().showMessage(
                 f"Updated description for Die# {bb.die_number}")
+
+    def _add_outsource_to_bluebook(self, bb):
+        """Show a list of outsources to add to this bluebook."""
+        all_outsources = outsource_service.list_outsources()
+        current_outsources = outsource_service.get_outsources_for_bluebook(bb.id)
+        current_ids = {o.id for o in current_outsources}
+
+        available = [o for o in all_outsources if o.id not in current_ids]
+
+        if not available:
+            # Offer to create a new outsource
+            name, ok = QInputDialog.getText(
+                self, "New Outsource",
+                "No available outsources. Enter a name to create one:")
+            if ok and name.strip():
+                try:
+                    new_o = outsource_service.create_outsource(name.strip())
+                    outsource_service.link_bluebook(new_o.id, bb.id)
+                    self._load_bluebooks()
+                    self.statusBar().showMessage(
+                        f"Created and added '{new_o.name}' to Die# {bb.die_number}")
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", str(e))
+            return
+
+        # Add "+ Create New..." option at the end
+        names = [o.name for o in available] + ["+ Create New..."]
+        name, ok = QInputDialog.getItem(
+            self, "Add Outsource",
+            f"Select outsource to add to Die# {bb.die_number}:",
+            names, 0, False)
+
+        if ok and name:
+            if name == "+ Create New...":
+                new_name, ok2 = QInputDialog.getText(
+                    self, "New Outsource", "Outsource name:")
+                if ok2 and new_name.strip():
+                    try:
+                        new_o = outsource_service.create_outsource(new_name.strip())
+                        outsource_service.link_bluebook(new_o.id, bb.id)
+                        self._load_bluebooks()
+                        self.statusBar().showMessage(
+                            f"Created and added '{new_o.name}' to Die# {bb.die_number}")
+                    except Exception as e:
+                        QMessageBox.warning(self, "Error", str(e))
+            else:
+                outsource = next(o for o in available if o.name == name)
+                outsource_service.link_bluebook(outsource.id, bb.id)
+                self._load_bluebooks()
+                self.statusBar().showMessage(
+                    f"Added '{name}' to Die# {bb.die_number}")
+
+    def _remove_outsource_from_bluebook(self, bb):
+        """Show a list of linked outsources to remove from this bluebook."""
+        current_outsources = outsource_service.get_outsources_for_bluebook(bb.id)
+        if not current_outsources:
+            return
+
+        names = [o.name for o in current_outsources]
+        name, ok = QInputDialog.getItem(
+            self, "Remove Outsource",
+            f"Select outsource to remove from Die# {bb.die_number}:",
+            names, 0, False)
+
+        if ok and name:
+            outsource = next(o for o in current_outsources if o.name == name)
+            reply = QMessageBox.question(
+                self, "Confirm Remove",
+                f"Remove '{name}' from Die# {bb.die_number}?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                outsource_service.unlink_bluebook(outsource.id, bb.id)
+                self._load_bluebooks()
+                self.statusBar().showMessage(
+                    f"Removed '{name}' from Die# {bb.die_number}")
 
     def _on_bluebooks_dropped(self, customer_id, bb_ids):
         """Link dropped bluebooks to the target customer."""

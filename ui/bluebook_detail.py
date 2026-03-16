@@ -7,6 +7,7 @@ Shows sections and files for a single bluebook with action buttons.
 import hashlib
 import os
 import tempfile
+import threading
 
 from PySide6.QtWidgets import (
     QFrame,
@@ -45,31 +46,109 @@ _DOCX_CACHE_DIR = os.path.join(tempfile.gettempdir(), "bluebook_docx_cache")
 os.makedirs(_DOCX_CACHE_DIR, exist_ok=True)
 
 
-class DocxConvertWorker(QThread):
-    """Background worker: convert DOCX → PDF via Word COM."""
-    finished = Signal(str)   # emits path to the cached PDF
-    error = Signal(str)      # emits error message
+class _WordCOMPool(QThread):
+    """Singleton thread that owns a persistent Word COM instance.
 
-    def __init__(self, docx_path: str, cache_path: str, parent=None):
-        super().__init__(parent)
-        self._docx_path = docx_path
-        self._cache_path = cache_path
+    Keeps Word.Application alive between conversions so subsequent
+    DOCX → PDF previews are near-instant instead of waiting for
+    Word to start up each time.
+    """
+    conversion_done = Signal(str, str)   # (request_id, pdf_path)
+    conversion_error = Signal(str, str)  # (request_id, error_msg)
+
+    def __init__(self):
+        super().__init__()
+        self._queue = []       # list of (request_id, docx_path, cache_path)
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._stop = False
+        self._word = None
+
+    # ── public API (called from main thread) ──
+
+    def request_conversion(self, request_id: str, docx_path: str, cache_path: str):
+        with self._lock:
+            self._queue.append((request_id, docx_path, cache_path))
+        self._event.set()
+
+    def shutdown(self):
+        self._stop = True
+        self._event.set()
+        self.wait(5000)
+
+    # ── thread body ──
 
     def run(self):
-        try:
-            import pythoncom
-            import win32com.client
+        import pythoncom
+        import win32com.client
 
-            pythoncom.CoInitialize()
-            word = win32com.client.Dispatch("Word.Application")
-            word.Visible = False
-            doc = word.Documents.Open(os.path.abspath(self._docx_path), ReadOnly=True)
-            doc.SaveAs(os.path.abspath(self._cache_path), FileFormat=17)
-            doc.Close(False)
-            word.Quit()
-            self.finished.emit(self._cache_path)
+        pythoncom.CoInitialize()
+        try:
+            self._word = win32com.client.DispatchEx("Word.Application")
+            self._word.Visible = False
+            self._word.DisplayAlerts = 0
         except Exception as e:
-            self.error.emit(str(e))
+            # If Word can't start, every request will fail
+            self._word = None
+
+        while not self._stop:
+            self._event.wait()
+            self._event.clear()
+
+            while True:
+                with self._lock:
+                    if not self._queue:
+                        break
+                    req_id, docx_path, cache_path = self._queue.pop(0)
+
+                if self._word is None:
+                    self.conversion_error.emit(
+                        req_id, "Microsoft Word could not be started.")
+                    continue
+
+                try:
+                    doc = self._word.Documents.Open(
+                        os.path.abspath(docx_path), ReadOnly=True)
+                    doc.SaveAs(os.path.abspath(cache_path), FileFormat=17)
+                    doc.Close(False)
+                    self.conversion_done.emit(req_id, cache_path)
+                except Exception as e:
+                    self.conversion_error.emit(req_id, str(e))
+                    # Try to recover: if Word crashed, restart it
+                    try:
+                        self._word = win32com.client.DispatchEx("Word.Application")
+                        self._word.Visible = False
+                        self._word.DisplayAlerts = 0
+                    except Exception:
+                        self._word = None
+
+        # Clean shutdown
+        if self._word is not None:
+            try:
+                self._word.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
+
+# Module-level singleton — created lazily on first use
+_word_pool: _WordCOMPool | None = None
+
+
+def _get_word_pool() -> _WordCOMPool:
+    global _word_pool
+    if _word_pool is None or not _word_pool.isRunning():
+        _word_pool = _WordCOMPool()
+        _word_pool.start()
+    return _word_pool
+
+
+def shutdown_word_pool():
+    """Call on app exit to cleanly close Word."""
+    global _word_pool
+    if _word_pool is not None:
+        _word_pool.shutdown()
+        _word_pool = None
 
 
 class ScaledPixmapLabel(QLabel):
@@ -145,11 +224,17 @@ class BluebookDetailWidget(QWidget):
             desc.setStyleSheet("color: #a6adc8; padding: 0 0 8px 0;")
             main_layout.addWidget(desc)
 
-        # Customers
+        # Customers & Outsource
+        info_parts = []
         customers_text = ", ".join(self.bluebook.customer_names) or "No customers linked"
-        cust_label = QLabel(f"{customers_text}")
-        cust_label.setStyleSheet("color: #94e2d5; padding: 0 0 8px 0;")
-        main_layout.addWidget(cust_label)
+        info_parts.append(f'<span style="color: #94e2d5;">Customer: {customers_text}</span>')
+        if self.bluebook.outsource_names:
+            outsource_text = ", ".join(self.bluebook.outsource_names)
+            info_parts.append(f'<span style="color: #f9e2af;">Outsource: {outsource_text}</span>')
+        info_label = QLabel("  |  ".join(info_parts))
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setStyleSheet("padding: 0 0 8px 0;")
+        main_layout.addWidget(info_label)
 
         # ── Main Splitter: Sections | Files + Preview ──
         main_splitter = QSplitter(Qt.Horizontal)
@@ -415,7 +500,7 @@ class BluebookDetailWidget(QWidget):
             self._show_preview_message(f"Could not preview PDF:\n{e}")
 
     def _preview_docx(self, abs_path):
-        """Convert DOCX to PDF (cached, background thread), then render."""
+        """Convert DOCX to PDF via persistent Word pool, then render."""
         # Build a cache key from file path + modification time
         try:
             mtime = os.path.getmtime(abs_path)
@@ -432,17 +517,29 @@ class BluebookDetailWidget(QWidget):
         # Show loading message while converting in background
         self._show_preview_message("⏳ Loading Preview...")
 
-        self._docx_worker = DocxConvertWorker(abs_path, cache_path, parent=self)
-        self._docx_worker.finished.connect(self._on_docx_ready)
-        self._docx_worker.error.connect(self._on_docx_error)
-        self._docx_worker.start()
+        # Use a unique request ID so we only handle our own result
+        self._docx_request_id = cache_key
+        pool = _get_word_pool()
+        pool.conversion_done.connect(self._on_docx_ready)
+        pool.conversion_error.connect(self._on_docx_error)
+        pool.request_conversion(cache_key, abs_path, cache_path)
 
-    def _on_docx_ready(self, pdf_path: str):
+    def _on_docx_ready(self, request_id: str, pdf_path: str):
         """Called when background DOCX→PDF conversion finishes."""
+        if request_id != getattr(self, "_docx_request_id", None):
+            return
+        pool = _get_word_pool()
+        pool.conversion_done.disconnect(self._on_docx_ready)
+        pool.conversion_error.disconnect(self._on_docx_error)
         self._render_pdf_preview(pdf_path)
 
-    def _on_docx_error(self, error_msg: str):
+    def _on_docx_error(self, request_id: str, error_msg: str):
         """Called when background DOCX→PDF conversion fails."""
+        if request_id != getattr(self, "_docx_request_id", None):
+            return
+        pool = _get_word_pool()
+        pool.conversion_done.disconnect(self._on_docx_ready)
+        pool.conversion_error.disconnect(self._on_docx_error)
         self._show_preview_message(
             f"Could not convert DOCX to PDF:\n{error_msg}\n\n"
             "Make sure Microsoft Word is installed.")

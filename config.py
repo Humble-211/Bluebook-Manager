@@ -26,6 +26,7 @@ LOG_FILE = os.path.join(LOG_DIR, "bluebook_manager.log")
 # Paths — bundled assets (inside the exe payload)
 TEMPLATE_DIR = os.path.join(BUNDLE_DIR, "templates")
 
+
 # Section type constants (order matters for printing)
 SECTION_TYPES = [
     "cover",

@@ -41,15 +41,21 @@ def main():
     # Load stylesheet
     load_stylesheet(app)
 
-    # Clean up DOCX preview cache on exit
-    def _cleanup_docx_cache():
+    # Pre-warm Word COM pool so first DOCX preview is instant
+    from ui.bluebook_detail import _get_word_pool
+    _get_word_pool()
+
+    # Clean up Word COM pool and DOCX preview cache on exit
+    def _cleanup_on_exit():
+        from ui.bluebook_detail import shutdown_word_pool
+        shutdown_word_pool()
         import shutil
         import tempfile
         cache_dir = os.path.join(tempfile.gettempdir(), "bluebook_docx_cache")
         if os.path.isdir(cache_dir):
             shutil.rmtree(cache_dir, ignore_errors=True)
 
-    app.aboutToQuit.connect(_cleanup_docx_cache)
+    app.aboutToQuit.connect(_cleanup_on_exit)
 
     # Launch main window
     from ui.main_window import MainWindow

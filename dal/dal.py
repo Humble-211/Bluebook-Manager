@@ -13,6 +13,7 @@ from dal.models import (
     Bluebook,
     BluebookFile,
     Customer,
+    Outsource,
     SharedFileMap,
 )
 
@@ -83,6 +84,71 @@ def delete_customer(customer_id: int):
 
 
 # ──────────────────────────────────────
+# Outsources
+# ──────────────────────────────────────
+
+def add_outsource(name: str, contact_info: str = "") -> int:
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO outsources (name, contact_info) VALUES (?, ?)",
+        (name, contact_info),
+    )
+    conn.commit()
+    oid = cur.lastrowid
+    conn.close()
+    return oid
+
+
+def get_outsource(outsource_id: int) -> Optional[Outsource]:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM outsources WHERE id = ?", (outsource_id,)).fetchone()
+    conn.close()
+    if row:
+        return Outsource(id=row["id"], name=row["name"],
+                         contact_info=row["contact_info"],
+                         created_at=row["created_at"])
+    return None
+
+
+def get_outsource_by_name(name: str) -> Optional[Outsource]:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM outsources WHERE name = ?", (name,)).fetchone()
+    conn.close()
+    if row:
+        return Outsource(id=row["id"], name=row["name"],
+                         contact_info=row["contact_info"],
+                         created_at=row["created_at"])
+    return None
+
+
+def list_outsources() -> list[Outsource]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM outsources ORDER BY name").fetchall()
+    conn.close()
+    return [Outsource(id=r["id"], name=r["name"],
+                      contact_info=r["contact_info"],
+                      created_at=r["created_at"]) for r in rows]
+
+
+def update_outsource(outsource_id: int, name: str, contact_info: str = ""):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE outsources SET name = ?, contact_info = ? WHERE id = ?",
+        (name, contact_info, outsource_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_outsource(outsource_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM outsource_bluebooks WHERE outsource_id = ?", (outsource_id,))
+    conn.execute("DELETE FROM outsources WHERE id = ?", (outsource_id,))
+    conn.commit()
+    conn.close()
+
+
+# ──────────────────────────────────────
 # Bluebooks
 # ──────────────────────────────────────
 
@@ -116,6 +182,14 @@ def get_bluebook(bluebook_id: int) -> Optional[Bluebook]:
         ORDER BY c.name
     """, (bluebook_id,)).fetchall()
     bb.customer_names = [cr["name"] for cr in crows]
+    # Fetch linked outsource names
+    orows = conn.execute("""
+        SELECT o.name FROM outsources o
+        JOIN outsource_bluebooks ob ON o.id = ob.outsource_id
+        WHERE ob.bluebook_id = ?
+        ORDER BY o.name
+    """, (bluebook_id,)).fetchall()
+    bb.outsource_names = [orow["name"] for orow in orows]
     conn.close()
     return bb
 
@@ -184,6 +258,19 @@ def list_bluebooks(search: str = "", customer_id: Optional[int] = None,
         for cr in crows:
             customer_map.setdefault(cr["bluebook_id"], []).append(cr["name"])
 
+    # Batch-fetch all outsource names in ONE query
+    outsource_map: dict[int, list[str]] = {}
+    if bb_ids:
+        orows = conn.execute(f"""
+            SELECT ob.bluebook_id, o.name
+            FROM outsources o
+            JOIN outsource_bluebooks ob ON o.id = ob.outsource_id
+            WHERE ob.bluebook_id IN ({placeholders})
+            ORDER BY o.name
+        """, bb_ids).fetchall()
+        for orow in orows:
+            outsource_map.setdefault(orow["bluebook_id"], []).append(orow["name"])
+
     bluebooks = []
     for r in rows:
         bb = Bluebook(id=r["id"], die_number=r["die_number"],
@@ -191,6 +278,7 @@ def list_bluebooks(search: str = "", customer_id: Optional[int] = None,
                       created_at=r["created_at"],
                       updated_at=r["updated_at"])
         bb.customer_names = customer_map.get(bb.id, [])
+        bb.outsource_names = outsource_map.get(bb.id, [])
         bluebooks.append(bb)
 
     conn.close()
@@ -218,6 +306,7 @@ def delete_bluebook(bluebook_id: int):
     """, (bluebook_id,))
     conn.execute("DELETE FROM bluebook_files WHERE bluebook_id = ?", (bluebook_id,))
     conn.execute("DELETE FROM customer_bluebooks WHERE bluebook_id = ?", (bluebook_id,))
+    conn.execute("DELETE FROM outsource_bluebooks WHERE bluebook_id = ?", (bluebook_id,))
     conn.execute("DELETE FROM bluebooks WHERE id = ?", (bluebook_id,))
     conn.commit()
     conn.close()
@@ -265,6 +354,46 @@ def get_customers_for_bluebook(bluebook_id: int) -> list[Customer]:
     return [Customer(id=r["id"], name=r["name"],
                      contact_info=r["contact_info"],
                      created_at=r["created_at"]) for r in rows]
+
+
+# ──────────────────────────────────────
+# Outsource ↔ Bluebook Links
+# ──────────────────────────────────────
+
+def link_outsource_bluebook(outsource_id: int, bluebook_id: int):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO outsource_bluebooks (outsource_id, bluebook_id) VALUES (?, ?)",
+            (outsource_id, bluebook_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def unlink_outsource_bluebook(outsource_id: int, bluebook_id: int):
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM outsource_bluebooks WHERE outsource_id = ? AND bluebook_id = ?",
+        (outsource_id, bluebook_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_outsources_for_bluebook(bluebook_id: int) -> list[Outsource]:
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT o.* FROM outsources o
+        JOIN outsource_bluebooks ob ON o.id = ob.outsource_id
+        WHERE ob.bluebook_id = ?
+        ORDER BY o.name
+    """, (bluebook_id,)).fetchall()
+    conn.close()
+    return [Outsource(id=r["id"], name=r["name"],
+                      contact_info=r["contact_info"],
+                      created_at=r["created_at"]) for r in rows]
 
 
 # ──────────────────────────────────────

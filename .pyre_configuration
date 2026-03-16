@@ -1,0 +1,11 @@
+{
+  "source_directories": ["."],
+  "python_interpreter": "C:\\Users\\hmai\\AppData\\Local\\Microsoft\\WindowsApps\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\python.exe",
+  "site_package_search_strategy": "all",
+  "search_path": [
+    "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\\Lib\\site-packages",
+    "C:\\Users\\hmai\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages"
+  ]
+}
+
+
