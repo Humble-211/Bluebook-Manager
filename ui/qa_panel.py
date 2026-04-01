@@ -75,7 +75,7 @@ class QAPanel(QWidget):
 
         # Header row
         header_row = QHBoxLayout()
-        title = QLabel("🔔  Quality Alerts")
+        title = QLabel("Quality Alerts")
         title.setObjectName("headerLabel")
         header_row.addWidget(title, 1)
 
@@ -87,8 +87,7 @@ class QAPanel(QWidget):
 
         # Count / search indicator
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet(
-            "color: #f9e2af; font-style: italic; padding: 2px 0 4px 0;")
+        self.count_label.setObjectName("qaCountLabel")
         layout.addWidget(self.count_label)
 
         # QA table
@@ -215,7 +214,7 @@ class QAPanel(QWidget):
                     self.count_label.setText(
                         f"🔎  {total} Quality Alert(s) matching \"{search}\"")
                 else:
-                    self.count_label.setText(f"🔔  {total} Quality Alert(s) total")
+                    self.count_label.setText(f"{total} Quality Alert(s) total")
 
         _insert_chunk(0)
 

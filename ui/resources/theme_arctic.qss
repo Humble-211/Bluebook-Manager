@@ -34,6 +34,12 @@ QLabel#sectionHeader {
     letter-spacing: 0.5px;
 }
 
+QLabel#qaCountLabel {
+    color: #1d4ed8;
+    font-style: italic;
+    padding: 2px 0 4px 0;
+}
+
 QLineEdit {
     background-color: #ffffff;
     border: 1.5px solid #cbd5e1;

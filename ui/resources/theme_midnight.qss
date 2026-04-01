@@ -37,6 +37,12 @@ QLabel#sectionHeader {
     text-transform: uppercase;
 }
 
+QLabel#qaCountLabel {
+    color: #f9e2af;
+    font-style: italic;
+    padding: 2px 0 4px 0;
+}
+
 /* ── Input Fields ────────────────────────────────────────────── */
 QLineEdit {
     background-color: #313244;
