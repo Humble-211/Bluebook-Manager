@@ -367,15 +367,16 @@ class MainWindow(QMainWindow):
         # Refresh customer list without triggering a second _load_bluebooks
         self.customer_panel.blockSignals(True)
         self.customer_panel.refresh()
+        self.customer_panel.set_selected_customer(self.current_customer_id)
         self.customer_panel.blockSignals(False)
 
         # Reset to empty state — user must search or pick a customer
-        self.current_customer_id = None
-        self.filter_label.setText("")
-        self.search_input.clear()
-        self.bluebook_table.setRowCount(0)
-        self.statusBar().showMessage(
-            "Search or select a customer to view bluebooks")
+        if self.current_customer_id:
+            c = customer_service.get_customer(self.current_customer_id)
+            self.filter_label.setText(f"Showing bluebooks for: {c.name}" if c else "")
+        else:
+            self.filter_label.setText("")
+        self._load_bluebooks()
 
         # Cleanup detail widget
         while self.stack.count() > 1:

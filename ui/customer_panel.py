@@ -87,7 +87,7 @@ class CustomerPanel(QWidget):
     def refresh(self):
         """Reload customer list."""
         self._all_customers = customer_service.list_customers()
-        self._populate_list(self._all_customers)
+        self._filter_customers(self.search_input.text())
 
     def _populate_list(self, customers):
         """Fill the list widget with given customers."""
@@ -115,6 +115,20 @@ class CustomerPanel(QWidget):
         else:
             filtered = [c for c in self._all_customers if text in c.name.lower()]
             self._populate_list(filtered)
+
+    def set_selected_customer(self, customer_id: int | None):
+        """Restore the current sidebar selection after a refresh."""
+        self.customer_list.blockSignals(True)
+        try:
+            for row in range(self.customer_list.count()):
+                item = self.customer_list.item(row)
+                if item.data(Qt.UserRole) == customer_id:
+                    self.customer_list.setCurrentRow(row)
+                    break
+            else:
+                self.customer_list.setCurrentRow(0)
+        finally:
+            self.customer_list.blockSignals(False)
 
     def _on_selection_changed(self, row):
         if row < 0:

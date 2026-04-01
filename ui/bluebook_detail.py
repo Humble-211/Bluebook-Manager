@@ -189,8 +189,10 @@ class BluebookDetailWidget(QWidget):
         self.bluebook_id = bluebook_id
         self.bluebook = bluebook_service.get_bluebook(bluebook_id)
         self.current_section = SECTION_TYPES[0]
+        self._docx_request_id: str | None = None
 
         self._build_ui()
+        self._connect_docx_preview_signals()
         self._load_sections()
         log("OPEN_BLUEBOOK", f"Die# {self.bluebook.die_number}")
 
@@ -328,9 +330,10 @@ class BluebookDetailWidget(QWidget):
     def _load_sections(self):
         """Populate the section list with file counts."""
         self.section_list.clear()
+        section_counts = file_service.get_section_file_counts(self.bluebook_id)
         for sec in SECTION_TYPES:
-            files = file_service.get_files_for_section(self.bluebook_id, sec)
-            count_str = f" ({len(files)})" if files else ""
+            count = section_counts.get(sec, 0)
+            count_str = f" ({count})" if count else ""
             item = QListWidgetItem(f"{SECTION_LABELS[sec]}{count_str}")
             item.setData(Qt.UserRole, sec)
             self.section_list.addItem(item)
@@ -348,6 +351,9 @@ class BluebookDetailWidget(QWidget):
         """Populate the file list for the current section."""
         self.file_list.clear()
         files = file_service.get_files_for_section(self.bluebook_id, self.current_section)
+        shared_original_ids = file_service.get_shared_original_file_ids(
+            [bf.id for bf in files if not bf.is_shared]
+        )
         for bf in files:
             name = os.path.basename(bf.file_path)
             # Strip .lnk extension for display
@@ -362,7 +368,7 @@ class BluebookDetailWidget(QWidget):
                     name = f"{prefix}{name}"
             else:
                 # Check if this file is shared TO other bluebooks
-                if sharing_service.is_file_shared(bf.id):
+                if bf.id in shared_original_ids:
                     prefix = "🔗 "
                     name = f"{prefix}{name}  [shared]"
 
@@ -377,6 +383,7 @@ class BluebookDetailWidget(QWidget):
 
     def _on_file_selected(self, current, previous):
         """Update the preview panel when a file is selected."""
+        self._cancel_pending_docx_preview()
         self._rotation_angle = 0
         self.preview_scroll._zoom_factor = 1.0
         if not current:
@@ -414,8 +421,19 @@ class BluebookDetailWidget(QWidget):
 
     def _clear_preview(self):
         """Reset preview to default state."""
+        self._cancel_pending_docx_preview()
         self._rotation_angle = 0
         self._show_preview_message("Select a file to preview")
+
+    def _connect_docx_preview_signals(self):
+        """Connect to the shared Word conversion worker once per widget."""
+        pool = _get_word_pool()
+        pool.conversion_done.connect(self._on_docx_ready)
+        pool.conversion_error.connect(self._on_docx_error)
+
+    def _cancel_pending_docx_preview(self):
+        """Invalidate any in-flight DOCX preview for this widget."""
+        self._docx_request_id = None
 
     def _rotate_preview(self):
         """Rotate all preview images by 90 degrees."""
@@ -520,26 +538,20 @@ class BluebookDetailWidget(QWidget):
         # Use a unique request ID so we only handle our own result
         self._docx_request_id = cache_key
         pool = _get_word_pool()
-        pool.conversion_done.connect(self._on_docx_ready)
-        pool.conversion_error.connect(self._on_docx_error)
         pool.request_conversion(cache_key, abs_path, cache_path)
 
     def _on_docx_ready(self, request_id: str, pdf_path: str):
         """Called when background DOCX→PDF conversion finishes."""
         if request_id != getattr(self, "_docx_request_id", None):
             return
-        pool = _get_word_pool()
-        pool.conversion_done.disconnect(self._on_docx_ready)
-        pool.conversion_error.disconnect(self._on_docx_error)
+        self._docx_request_id = None
         self._render_pdf_preview(pdf_path)
 
     def _on_docx_error(self, request_id: str, error_msg: str):
         """Called when background DOCX→PDF conversion fails."""
         if request_id != getattr(self, "_docx_request_id", None):
             return
-        pool = _get_word_pool()
-        pool.conversion_done.disconnect(self._on_docx_ready)
-        pool.conversion_error.disconnect(self._on_docx_error)
+        self._docx_request_id = None
         self._show_preview_message(
             f"Could not convert DOCX to PDF:\n{error_msg}\n\n"
             "Make sure Microsoft Word is installed.")

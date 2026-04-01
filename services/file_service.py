@@ -131,31 +131,26 @@ def _autofill_template(dest_path: str, bb, filename: str = ""):
         if m_ff:
             ff_number = m_ff.group(1)
 
-        table = doc.tables[0]
-        for row in table.rows:
-            for i, cell in enumerate(row.cells):
-                text = cell.text.strip().lower()
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    text = cell.text.strip().lower()
+                    if not text or ":" not in cell.text:
+                        continue
 
-                # Find label cells and fill the adjacent cell (or same cell after colon)
-                if 'customer' in text and ':' in cell.text:
-                    _fill_cell_value(cell, "Customer", customer_names)
-                elif 'die' in text and ':' in cell.text:
-                    _fill_cell_value(cell, "Die", die_number)
-                elif 'type of complaint' in text and ':' in cell.text:
-                    _fill_cell_value(cell, "Type of Complaint", complaint_type)
-                elif 'date' in text and ':' in cell.text:
-                    _fill_cell_value(cell, "Date", today)
-
-        table1 = doc.tables[1]
-        # Check all tables to be safe, since templates might differ
-        for row in table1.rows:
-            for i, cell in enumerate(row.cells):
-                text = cell.text.strip().lower()
-                if 'q.a' in text and ':' in cell.text:
-                    if qa_number:
+                    # Templates evolve over time, so scan every table instead
+                    # of relying on fixed table indexes.
+                    if "customer" in text:
+                        _fill_cell_value(cell, "Customer", customer_names)
+                    elif "die" in text:
+                        _fill_cell_value(cell, "Die", die_number)
+                    elif "type of complaint" in text:
+                        _fill_cell_value(cell, "Type of Complaint", complaint_type)
+                    elif "date" in text:
+                        _fill_cell_value(cell, "Date", today)
+                    elif "q.a" in text and qa_number:
                         _fill_cell_value(cell, "Q.A", qa_number)
-                elif 'f-f' in text and ':' in cell.text:
-                    if ff_number:
+                    elif "f-f" in text and ff_number:
                         _fill_cell_value(cell, "F-F", ff_number)
         doc.save(dest_path)
     except Exception as e:
@@ -380,5 +375,15 @@ def get_files_for_section(bluebook_id: int, section_type: str) -> list[BluebookF
 def get_all_files(bluebook_id: int) -> list[BluebookFile]:
     """Get all files for a bluebook."""
     return dal.get_files_for_bluebook(bluebook_id)
+
+
+def get_section_file_counts(bluebook_id: int) -> dict[str, int]:
+    """Get all per-section file counts for a bluebook."""
+    return dal.get_section_file_counts(bluebook_id)
+
+
+def get_shared_original_file_ids(file_ids: list[int]) -> set[int]:
+    """Return file IDs that are shared to other bluebooks."""
+    return dal.get_shared_original_file_ids(file_ids)
 
 

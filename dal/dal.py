@@ -502,6 +502,47 @@ def get_files_for_bluebook(bluebook_id: int,
     return files
 
 
+def get_section_file_counts(bluebook_id: int) -> dict[str, int]:
+    """Get per-section counts for own and shared files in one query."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT section_type, SUM(cnt) AS total_count
+        FROM (
+            SELECT section_type, COUNT(*) AS cnt
+            FROM bluebook_files
+            WHERE bluebook_id = ?
+            GROUP BY section_type
+
+            UNION ALL
+
+            SELECT bf.section_type, COUNT(*) AS cnt
+            FROM shared_files_map sfm
+            JOIN bluebook_files bf ON sfm.original_file_id = bf.id
+            WHERE sfm.linked_bluebook_id = ?
+            GROUP BY bf.section_type
+        )
+        GROUP BY section_type
+    """, (bluebook_id, bluebook_id)).fetchall()
+    conn.close()
+    return {row["section_type"]: row["total_count"] for row in rows}
+
+
+def get_shared_original_file_ids(file_ids: list[int]) -> set[int]:
+    """Return the subset of file_ids that are shared to other bluebooks."""
+    if not file_ids:
+        return set()
+
+    conn = get_connection()
+    placeholders = ",".join("?" * len(file_ids))
+    rows = conn.execute(f"""
+        SELECT DISTINCT original_file_id
+        FROM shared_files_map
+        WHERE original_file_id IN ({placeholders})
+    """, file_ids).fetchall()
+    conn.close()
+    return {row["original_file_id"] for row in rows}
+
+
 def delete_bluebook_file(file_id: int):
     conn = get_connection()
     # Remove sharing refs first
