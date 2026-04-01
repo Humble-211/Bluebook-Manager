@@ -87,6 +87,11 @@ def init_db():
             last_number  INTEGER NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS ff_counter (
+            year         INTEGER PRIMARY KEY,
+            last_number  INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE INDEX IF NOT EXISTS idx_bluebooks_die_number
             ON bluebooks(die_number);
         CREATE INDEX IF NOT EXISTS idx_customer_bluebooks_bluebook

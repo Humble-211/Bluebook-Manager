@@ -11,19 +11,10 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QFile, QTextStream
 
 from config import BUNDLE_DIR
 from dal.database import init_db
 from services.log_service import setup_logging
-
-
-def load_stylesheet(app: QApplication):
-    """Load the QSS stylesheet."""
-    qss_path = os.path.join(BUNDLE_DIR, "ui", "resources", "styles.qss")
-    if os.path.isfile(qss_path):
-        with open(qss_path, "r") as f:
-            app.setStyleSheet(f.read())
 
 
 def main():
@@ -38,8 +29,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Bluebook Manager")
 
-    # Load stylesheet
-    load_stylesheet(app)
+    # Initialize theme manager and restore last-used theme
+    from services.theme_manager import ThemeManager
+    theme_manager = ThemeManager(app)
+    theme_manager.load_saved()
 
     # Pre-warm Word COM pool so first DOCX preview is instant
     from ui.bluebook_detail import _get_word_pool
@@ -59,7 +52,7 @@ def main():
 
     # Launch main window
     from ui.main_window import MainWindow
-    window = MainWindow()
+    window = MainWindow(theme_manager=theme_manager)
     window.show()
 
     sys.exit(app.exec())

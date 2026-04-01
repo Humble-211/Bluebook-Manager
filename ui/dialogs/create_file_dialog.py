@@ -73,7 +73,7 @@ class CreateFileDialog(QDialog):
         layout.addLayout(btn_layout)
 
         # Connect text change once — the slot checks the mode itself
-        self.filename_input.textChanged.connect(self._update_qa_preview)
+        self.filename_input.textChanged.connect(self._update_preview)
 
         # Apply initial section state
         self._on_section_changed()
@@ -81,40 +81,65 @@ class CreateFileDialog(QDialog):
     def _is_quality_alerts(self) -> bool:
         return self.section_combo.currentData() == "quality_alerts"
 
+    def _is_fit_and_functions(self) -> bool:
+        return self.section_combo.currentData() == "fit_and_functions"
+
+    def _is_auto_generated(self) -> bool:
+        return self._is_quality_alerts() or self._is_fit_and_functions()
+
     def _on_section_changed(self):
         """Update UI labels based on selected section."""
         if self._is_quality_alerts():
             self.filename_label.setText("Description:")
             self.filename_input.setPlaceholderText("e.g. Screw Hole")
+            self.filename_label.show()
+            self.filename_input.show()
             self.qa_preview.show()
-            self._update_qa_preview()
+            self._update_preview()
+        elif self._is_fit_and_functions():
+            self.filename_label.hide()
+            self.filename_input.hide()
+            self.qa_preview.show()
+            self._update_preview()
         else:
             self.filename_label.setText("Filename (without extension):")
-            self.filename_input.setPlaceholderText("e.g. quality_alert_001")
+            self.filename_input.setPlaceholderText("e.g. file_001")
+            self.filename_label.show()
+            self.filename_input.show()
             self.qa_preview.hide()
 
-    def _update_qa_preview(self):
-        """Show a preview of the generated QA filename."""
-        if not self._is_quality_alerts():
+    def _update_preview(self):
+        """Show a preview of the generated QA or FF filename."""
+        if not self._is_auto_generated():
             return
-        desc = self.filename_input.text().strip()
-        if not desc:
-            self.qa_preview.setText("Filename: QA-YY-NNN-DIENUM-<description>.docx")
-            return
+        
         year_2d = datetime.now().year % 100
-        desc_part = desc.replace(" ", "-")
-        preview = f"QA-{year_2d:02d}-NNN-{self._die_number}-{desc_part}.docx"
-        self.qa_preview.setText(f"Filename: {preview}")
+        
+        if self._is_quality_alerts():
+            desc = self.filename_input.text().strip()
+            if not desc:
+                self.qa_preview.setText(f"Filename: QA-YY-NNN-DIENUM-<description>.docx")
+                return
+            desc_part = desc.replace(" ", "-")
+            preview = f"QA-{year_2d:02d}-NNN-{self._die_number}-{desc_part}.docx"
+            self.qa_preview.setText(f"Filename: {preview}")
+        else:
+            # Fit and functions
+            preview = f"FF-{year_2d:02d}-NNN-{self._die_number}.docx"
+            self.qa_preview.setText(f"Filename: {preview}")
 
     def _on_create(self):
         self.result_section = self.section_combo.currentData()
         raw_input = self.filename_input.text().strip()
 
-        if not raw_input:
-            label = "description" if self._is_quality_alerts() else "filename"
-            QMessageBox.warning(self, f"Missing {'Description' if self._is_quality_alerts() else 'Filename'}",
-                                f"Please enter a {label}.")
-            return
+        if self._is_quality_alerts():
+            if not raw_input:
+                QMessageBox.warning(self, "Missing Description", "Please enter a description.")
+                return
+        elif not self._is_auto_generated():
+            if not raw_input:
+                QMessageBox.warning(self, "Missing Filename", "Please enter a filename.")
+                return
 
         if self._is_quality_alerts():
             # Auto-generate QA filename: QA-YY-NNN-DIENUM-description
@@ -126,6 +151,11 @@ class CreateFileDialog(QDialog):
             for ch in invalid_chars:
                 desc_part = desc_part.replace(ch, "_")
             self.result_filename = f"QA-{year_2d:02d}-{next_num:03d}-{self._die_number}-{desc_part}"
+        elif self._is_fit_and_functions():
+            # Auto-generate FF filename: FF-YY-NNN-DIENUM
+            year_2d = datetime.now().year % 100
+            next_num = dal.get_next_ff_number(year_2d)
+            self.result_filename = f"FF-{year_2d:02d}-{next_num:03d}-{self._die_number}"
         else:
             self.result_filename = raw_input
             # Sanitize filename

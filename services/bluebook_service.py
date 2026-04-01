@@ -33,9 +33,11 @@ def get_bluebook_by_die(die_number: str) -> Bluebook:
 
 
 def search_bluebooks(search: str = "", customer_id: int = None,
-                     search_description: bool = False) -> list[Bluebook]:
+                     search_description: bool = False,
+                     search_qa: bool = False) -> list[Bluebook]:
     return dal.list_bluebooks(search=search, customer_id=customer_id,
-                              search_description=search_description)
+                              search_description=search_description,
+                              search_qa=search_qa)
 
 
 def delete_bluebook(bluebook_id: int, delete_files: bool = False):

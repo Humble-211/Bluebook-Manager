@@ -211,37 +211,49 @@ def get_bluebook_by_die(die_number: str) -> Optional[Bluebook]:
 
 def list_bluebooks(search: str = "", customer_id: Optional[int] = None,
                    limit: int = 200,
-                   search_description: bool = False) -> list[Bluebook]:
-    """List bluebooks with optional die-number or description search and customer filter."""
+                   search_description: bool = False,
+                   search_qa: bool = False) -> list[Bluebook]:
+    """List bluebooks with optional die-number/description/QA search and customer filter.
+
+    Pass limit=0 to return all bluebooks with no cap.
+    """
     conn = get_connection()
 
-    search_col = "b.description" if search_description else "b.die_number"
-    search_col_noalias = "description" if search_description else "die_number"
+    query = "SELECT DISTINCT b.* FROM bluebooks b"
+    joins = []
+    where_clauses = []
+    params: list = []
 
     if customer_id:
-        query = """
-            SELECT DISTINCT b.* FROM bluebooks b
-            JOIN customer_bluebooks cb ON b.id = cb.bluebook_id
-            WHERE cb.customer_id = ?
-        """
-        params: list = [customer_id]
+        joins.append("JOIN customer_bluebooks cb ON b.id = cb.bluebook_id")
+        where_clauses.append("cb.customer_id = ?")
+        params.append(customer_id)
+        
+    if search_qa:
+        joins.append("JOIN bluebook_files bf ON b.id = bf.bluebook_id")
+        where_clauses.append("bf.section_type = 'quality_alerts'")
         if search:
-            query += f" AND {search_col} LIKE ?"
+            where_clauses.append("bf.file_path LIKE ?")
             params.append(f"%{search}%")
-        query += " ORDER BY b.die_number"
-        if limit:
-            query += f" LIMIT {limit}"
-        rows = conn.execute(query, params).fetchall()
     else:
         if search:
-            rows = conn.execute(
-                f"SELECT * FROM bluebooks WHERE {search_col_noalias} LIKE ? ORDER BY die_number LIMIT {limit}",
-                (f"%{search}%",)
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT * FROM bluebooks ORDER BY die_number LIMIT {limit}"
-            ).fetchall()
+            if search_description:
+                where_clauses.append("b.description LIKE ?")
+            else:
+                where_clauses.append("b.die_number LIKE ?")
+            params.append(f"%{search}%")
+
+    sql = query
+    if joins:
+        sql += " " + " ".join(joins)
+    if where_clauses:
+        sql += " WHERE " + " AND ".join(where_clauses)
+        
+    sql += " ORDER BY b.die_number"
+    if limit:
+        sql += f" LIMIT {limit}"
+
+    rows = conn.execute(sql, params).fetchall()
 
     # Batch-fetch all customer names in ONE query instead of N+1
     bb_ids = [r["id"] for r in rows]
@@ -524,6 +536,71 @@ def get_file_counts_batch(bb_ids: list[int]) -> dict[int, int]:
     return {r["bluebook_id"]: r["cnt"] for r in rows}
 
 
+def get_all_quality_alerts(search: str = "") -> list[dict]:
+    """Return all quality_alert files across all bluebooks, ordered by filename.
+
+    Each record is a plain dict with keys:
+        file_id, file_path, bluebook_id, die_number, customer_names, created_at
+
+    Optionally filter by *search* (matched against the file_path).
+    """
+    conn = get_connection()
+
+    if search:
+        rows = conn.execute("""
+            SELECT bf.id as file_id, bf.file_path, bf.bluebook_id, bf.created_at,
+                   b.die_number
+            FROM bluebook_files bf
+            JOIN bluebooks b ON bf.bluebook_id = b.id
+            WHERE bf.section_type = 'quality_alerts'
+              AND (bf.file_path LIKE ? OR b.die_number LIKE ?)
+            ORDER BY bf.file_path ASC
+        """, (f"%{search}%", f"%{search}%")).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT bf.id as file_id, bf.file_path, bf.bluebook_id, bf.created_at,
+                   b.die_number
+            FROM bluebook_files bf
+            JOIN bluebooks b ON bf.bluebook_id = b.id
+            WHERE bf.section_type = 'quality_alerts'
+            ORDER BY bf.file_path ASC
+        """).fetchall()
+
+    if not rows:
+        conn.close()
+        return []
+
+    # Batch-fetch customer names to avoid N+1
+    bb_ids = list({r["bluebook_id"] for r in rows})
+    customer_map: dict[int, list[str]] = {}
+    if bb_ids:
+        placeholders = ",".join("?" * len(bb_ids))
+        crows = conn.execute(f"""
+            SELECT cb.bluebook_id, c.name
+            FROM customers c
+            JOIN customer_bluebooks cb ON c.id = cb.customer_id
+            WHERE cb.bluebook_id IN ({placeholders})
+            ORDER BY c.name
+        """, bb_ids).fetchall()
+        for cr in crows:
+            customer_map.setdefault(cr["bluebook_id"], []).append(cr["name"])
+
+    conn.close()
+
+    return [
+        {
+            "file_id": r["file_id"],
+            "file_path": r["file_path"],
+            "bluebook_id": r["bluebook_id"],
+            "die_number": r["die_number"],
+            "customer_names": customer_map.get(r["bluebook_id"], []),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+
 def get_next_display_order(bluebook_id: int, section_type: str) -> int:
     conn = get_connection()
     row = conn.execute(
@@ -666,6 +743,59 @@ def set_qa_counter(year: int, number: int):
     conn = get_connection()
     conn.execute(
         "INSERT INTO qa_counter (year, last_number) VALUES (?, ?) "
+        "ON CONFLICT(year) DO UPDATE SET last_number = ?",
+        (year, number, number))
+    conn.commit()
+    conn.close()
+
+
+# ──────────────────────────────────────
+# FF Counter
+# ──────────────────────────────────────
+
+def get_next_ff_number(year: int) -> int:
+    """Find the lowest available FF number for a given year by scanning existing files.
+
+    Looks at all fit_and_functions filenames matching FF-YY-NNN-* to collect
+    used numbers, then returns the smallest gap starting from 1.
+    Deleting an FF file automatically frees its number for reuse.
+    """
+    import re
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT file_path FROM bluebook_files WHERE section_type = 'fit_and_functions'"
+    ).fetchall()
+    conn.close()
+
+    pattern = re.compile(rf"FF-{year:02d}-(\d{{3}})", re.IGNORECASE)
+    used: set[int] = set()
+    for r in rows:
+        filename = r["file_path"].rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        m = pattern.match(filename)
+        if m:
+            used.add(int(m.group(1)))
+
+    # Find lowest available number starting from 1
+    num = 1
+    while num in used:
+        num += 1
+    return num
+
+
+def get_ff_counter(year: int) -> int:
+    """Get the current FF counter for a year (without incrementing)."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT last_number FROM ff_counter WHERE year = ?", (year,)).fetchone()
+    conn.close()
+    return row["last_number"] if row else 0
+
+
+def set_ff_counter(year: int, number: int):
+    """Set the FF counter for a year to a specific value."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO ff_counter (year, last_number) VALUES (?, ?) "
         "ON CONFLICT(year) DO UPDATE SET last_number = ?",
         (year, number, number))
     conn.commit()

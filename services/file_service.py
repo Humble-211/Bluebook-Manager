@@ -85,8 +85,8 @@ def create_from_template(bluebook_id: int, section_type: str,
 
     shutil.copy2(template_path, dest_path)
 
-    # Auto-fill table fields for quality alerts and quality notes
-    if section_type in ("quality_alerts", "quality_notes"):
+    # Auto-fill table fields for quality alerts, quality notes, and fit and functions
+    if section_type in ("quality_alerts", "quality_notes", "fit_and_functions"):
         _autofill_template(dest_path, bb, filename)
 
     # Store relative path in DB
@@ -125,6 +125,12 @@ def _autofill_template(dest_path: str, bb, filename: str = ""):
         if m:
             qa_number = m.group(1)
 
+        # Extract FF number from filename (e.g. FF-26-001 from FF-26-001-15901-Setup.docx)
+        ff_number = ""
+        m_ff = re.match(r"^FF-\d{2}-0?(\d{1,3})", filename, re.IGNORECASE)
+        if m_ff:
+            ff_number = m_ff.group(1)
+
         table = doc.tables[0]
         for row in table.rows:
             for i, cell in enumerate(row.cells):
@@ -141,12 +147,16 @@ def _autofill_template(dest_path: str, bb, filename: str = ""):
                     _fill_cell_value(cell, "Date", today)
 
         table1 = doc.tables[1]
+        # Check all tables to be safe, since templates might differ
         for row in table1.rows:
             for i, cell in enumerate(row.cells):
                 text = cell.text.strip().lower()
                 if 'q.a' in text and ':' in cell.text:
                     if qa_number:
                         _fill_cell_value(cell, "Q.A", qa_number)
+                elif 'f-f' in text and ':' in cell.text:
+                    if ff_number:
+                        _fill_cell_value(cell, "F-F", ff_number)
         doc.save(dest_path)
     except Exception as e:
         log("AUTOFILL_ERROR", f"Could not auto-fill template {dest_path}: {e}")

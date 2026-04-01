@@ -31,6 +31,7 @@ from config import SECTION_LABELS
 from services import bluebook_service, customer_service, outsource_service
 from ui.bluebook_detail import BluebookDetailWidget
 from ui.customer_panel import CustomerPanel
+from ui.qa_window import QAWindow
 
 
 class BluebookTable(QTableWidget):
@@ -104,13 +105,15 @@ class BluebookTable(QTableWidget):
 class MainWindow(QMainWindow):
     """Application main window."""
 
-    def __init__(self):
+    def __init__(self, theme_manager=None):
         super().__init__()
         self.setWindowTitle("Bluebook Manager")
         self.setMinimumSize(1100, 700)
         self.resize(1280, 800)
 
         self.current_customer_id = None  # None = show all
+        self._qa_window: QAWindow | None = None  # singleton QA browser
+        self._theme_manager = theme_manager
 
         self._build_ui()
         self.statusBar().showMessage("Search or select a customer to view bluebooks")
@@ -147,12 +150,23 @@ class MainWindow(QMainWindow):
         title = QLabel("Bluebook Manager")
         title.setObjectName("headerLabel")
         title_row.addWidget(title, 1)
+
+        # Theme cycle button
+        if self._theme_manager:
+            self._theme_btn = QPushButton(self._theme_label())
+            self._theme_btn.setObjectName("themeButton")
+            self._theme_btn.setToolTip("Click to switch theme")
+            self._theme_btn.setFixedHeight(28)
+            self._theme_btn.clicked.connect(self._cycle_theme)
+            title_row.addWidget(self._theme_btn)
+
         right_layout.addLayout(title_row)
 
         # Search bar row
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍  Search by Die Number (use , for multiple)  |  prefix 'desc ' to search by description")
+        self.search_input.setPlaceholderText(
+            "🔍  Search by Die Number (use , for multiple)  |  prefix 'desc ' to search by description")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_search_changed)
         search_row.addWidget(self.search_input, 1)
@@ -162,8 +176,18 @@ class MainWindow(QMainWindow):
         btn_new.clicked.connect(self._create_bluebook)
         search_row.addWidget(btn_new)
 
-
         right_layout.addLayout(search_row)
+
+        # Quality Alerts shortcut button
+        qa_row = QHBoxLayout()
+        btn_qa = QPushButton("🔔  Quality Alerts Search")
+        btn_qa.setObjectName("primaryButton")
+        btn_qa.setFixedHeight(28)
+        btn_qa.setToolTip("Open the Quality Alerts browser window")
+        btn_qa.clicked.connect(self._open_qa_window)
+        qa_row.addWidget(btn_qa)
+        qa_row.addStretch()
+        right_layout.addLayout(qa_row)
 
         # Customer filter indicator
         self.filter_label = QLabel("")
@@ -211,21 +235,21 @@ class MainWindow(QMainWindow):
         # Status bar
         self.statusBar().showMessage("Ready")
 
-        # Debounce timer for search
+        # Debounce timer for search — 150ms feels snappy vs 300ms
         self._search_timer = QTimer()
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._do_search)
 
     def _on_search_changed(self, text):
-        """Debounce search input."""
-        # Update placeholder to hint at current search mode
-        if text.lower().startswith("desc ") or text.lower() == "desc":
+        """Debounce search input — 150ms after last keystroke."""
+        lower = text.lower().strip()
+        if lower.startswith("desc ") or lower == "desc":
             self.search_input.setPlaceholderText(
                 "🔍  Searching by Description...")
         else:
             self.search_input.setPlaceholderText(
                 "🔍  Search by Die Number (use , for multiple)  |  prefix 'desc ' to search by description")
-        self._search_timer.start(300)
+        self._search_timer.start(150)
 
     def _do_search(self):
         self._load_bluebooks()
@@ -245,7 +269,6 @@ class MainWindow(QMainWindow):
         """Load bluebooks into the table, applying search and customer filter."""
         raw = self.search_input.text().strip()
 
-        # Detect "desc " prefix → search by description mode
         search_description = False
         if raw.lower().startswith("desc "):
             search_description = True
@@ -359,6 +382,35 @@ class MainWindow(QMainWindow):
             w = self.stack.widget(1)
             self.stack.removeWidget(w)
             w.deleteLater()
+
+    def _theme_label(self) -> str:
+        """Return a display label for the theme button."""
+        if not self._theme_manager:
+            return ""
+        icons = {"midnight": "🌙", "oceanic": "🌊", "ember": "🔥", "arctic": "☀️"}
+        name = self._theme_manager.current
+        icon = icons.get(name, "●")
+        label = self._theme_manager.label(name)
+        return f"{icon}  {label}"
+
+    def _cycle_theme(self):
+        """Cycle to the next theme and update the button label."""
+        if not self._theme_manager:
+            return
+        self._theme_manager.next_theme()
+        if hasattr(self, "_theme_btn"):
+            self._theme_btn.setText(self._theme_label())
+        self.statusBar().showMessage(
+            f"Theme: {self._theme_manager.label(self._theme_manager.current)}", 3000)
+
+    def _open_qa_window(self):
+        """Open (or bring to front) the Quality Alerts browser window."""
+        if self._qa_window is None or not self._qa_window.isVisible():
+            self._qa_window = QAWindow(parent=None)   # no parent = own taskbar entry
+            # When user navigates from QA window to a bluebook, open it here
+            self._qa_window.open_bluebook_requested.connect(self._show_detail)
+
+        self._qa_window.activate()
 
     def _toggle_console(self):
         """Toggle the visibility of the Windows console (Windows only)."""

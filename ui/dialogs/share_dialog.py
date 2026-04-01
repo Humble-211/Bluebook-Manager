@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 from dal import dal
 
@@ -23,7 +23,8 @@ class ShareDialog(QDialog):
     """Dialog to select target bluebooks for sharing a file.
 
     Search behaviour:
-    - Default: search by die number.
+    - Default: search by die number (DB query fires on each keystroke, debounced).
+      List starts empty — type to search.
     - If search starts with 'cust', switch to customer mode — show customers
       and selecting a customer shares to ALL of their bluebooks.
     """
@@ -35,10 +36,22 @@ class ShareDialog(QDialog):
         self.selected_bluebook_ids: list[int] = []
         self._customer_mode = False
 
+        # Get already-shared targets once on open (cheap query)
+        already_shared = dal.get_shared_targets(self.file_id)
+        self.already_shared_ids = {b.id for b in already_shared}
+
         self.setWindowTitle("Share to Other Bluebooks")
         self.setMinimumSize(450, 500)
         self._build_ui()
-        self._load_bluebooks()
+
+        # Debounce timer — fires DB query 300 ms after last keystroke
+        self._search_timer = QTimer()
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._do_search)
+
+        if self.already_shared_ids:
+            self.info_label.setText(
+                f"Already shared to {len(self.already_shared_ids)} bluebook(s)")
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -52,7 +65,7 @@ class ShareDialog(QDialog):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
             '🔍 Search by Die Number... (type "cust" to search by Customer)')
-        self.search_input.textChanged.connect(self._filter_list)
+        self.search_input.textChanged.connect(self._on_search_changed)
         layout.addWidget(self.search_input)
 
         # Mode hint label
@@ -64,6 +77,12 @@ class ShareDialog(QDialog):
         # Bluebook list with checkboxes
         self.bluebook_list = QListWidget()
         layout.addWidget(self.bluebook_list)
+
+        # Prompt shown when list is empty
+        self.prompt_label = QLabel("Type a die number above to search bluebooks.")
+        self.prompt_label.setAlignment(Qt.AlignCenter)
+        self.prompt_label.setStyleSheet("color: #6c7086; font-style: italic; padding: 12px;")
+        layout.addWidget(self.prompt_label)
 
         # Already shared info
         self.info_label = QLabel("")
@@ -82,17 +101,46 @@ class ShareDialog(QDialog):
         btn_layout.addWidget(btn_share)
         layout.addLayout(btn_layout)
 
-    def _load_bluebooks(self):
-        self.all_bluebooks = dal.list_bluebooks()
-        # Get already-shared targets
-        already_shared = dal.get_shared_targets(self.file_id)
-        self.already_shared_ids = {b.id for b in already_shared}
+    # ── Search / filter ──────────────────────────────────────────────────────
 
-        self._populate_list(self.all_bluebooks)
+    def _on_search_changed(self, text):
+        """Kick off debounce timer on each keystroke."""
+        text_lower = text.strip().lower()
+        if text_lower.startswith("cust"):
+            self._customer_mode = True
+            self.mode_label.setText(
+                "📋 Customer mode — selecting a customer shares to all their bluebooks")
+            self.mode_label.show()
+        else:
+            self._customer_mode = False
+            self.mode_label.hide()
 
-        if self.already_shared_ids:
-            self.info_label.setText(
-                f"Already shared to {len(self.already_shared_ids)} bluebook(s)")
+        self._search_timer.start(300)
+
+    def _do_search(self):
+        """Run the actual DB query after debounce settles."""
+        text_lower = self.search_input.text().strip().lower()
+
+        if not text_lower:
+            # Empty input → clear list, show prompt
+            self.bluebook_list.clear()
+            self.prompt_label.show()
+            return
+
+        self.prompt_label.hide()
+
+        if text_lower.startswith("cust"):
+            search_part = text_lower[4:].lstrip(": ")
+            customers = dal.list_customers()
+            if search_part:
+                customers = [c for c in customers if search_part in c.name.lower()]
+            self._populate_customer_list(customers)
+        else:
+            # Query DB with the typed die number fragment
+            bluebooks = dal.list_bluebooks(search=text_lower, limit=200)
+            self._populate_list(bluebooks)
+
+    # ── Population helpers ───────────────────────────────────────────────────
 
     def _populate_list(self, bluebooks):
         self.bluebook_list.clear()
@@ -132,29 +180,7 @@ class ShareDialog(QDialog):
             self.bluebook_list.addItem(item)
             self.bluebook_list.setItemWidget(item, checkbox)
 
-    def _filter_list(self, text):
-        text_lower = text.strip().lower()
-
-        if text_lower.startswith("cust"):
-            # Customer search mode
-            self._customer_mode = True
-            self.mode_label.setText("📋 Customer mode — selecting a customer shares to all their bluebooks")
-            self.mode_label.show()
-
-            # Extract the search term after "cust" (strip optional colon/space)
-            search_part = text_lower[4:].lstrip(": ")
-            customers = dal.list_customers()
-            if search_part:
-                customers = [c for c in customers
-                             if search_part in c.name.lower()]
-            self._populate_customer_list(customers)
-        else:
-            # Normal die number search mode
-            self._customer_mode = False
-            self.mode_label.hide()
-            filtered = [bb for bb in self.all_bluebooks
-                        if text_lower in bb.die_number.lower()]
-            self._populate_list(filtered)
+    # ── Share action ─────────────────────────────────────────────────────────
 
     def _on_share(self):
         self.selected_bluebook_ids.clear()

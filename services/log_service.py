@@ -27,6 +27,7 @@ def setup_logging():
     logging.getLogger().addHandler(console)
 
 
+
 def log(action: str, details: str = ""):
     """Log to both file and database."""
     logging.info(f"{action}: {details}")
