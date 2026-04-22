@@ -17,9 +17,20 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Trim provably-unused stdlib tools.
+    # IMPORTANT: Do NOT add email, html, http, xmlrpc, or difflib here.
+    # PyInstaller's pyi_rth_setuptools.py runtime hook imports pkg_resources,
+    # which top-level imports email.parser — excluding email silently breaks
+    # module resolution for lxml and python-docx at runtime in the EXE.
+    excludes=[
+        'tkinter', '_tkinter',
+        'unittest',
+        'pydoc', 'doctest',
+        'curses',
+    ],
     noarchive=False,
-    optimize=0,
+    # optimize=1 strips docstrings -> smaller .pyc -> faster bytecode load
+    optimize=1,
 )
 pyz = PYZ(a.pure)
 
@@ -46,6 +57,14 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    # Exclude Qt DLLs from UPX: decompressing large Qt binaries at every
+    # launch costs more startup time than the size saving is worth.
+    upx_exclude=[
+        'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll',
+        'Qt6Network.dll', 'Qt6Svg.dll', 'Qt6OpenGL.dll',
+        'Qt6DBus.dll', 'Qt6PrintSupport.dll',
+        'qwindows.dll', 'qwindowsvistastyle.dll',
+        'python3*.dll', 'vcruntime*.dll', 'msvcp*.dll',
+    ],
     name='BluebookManager',
 )

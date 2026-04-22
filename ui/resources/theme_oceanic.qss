@@ -40,6 +40,18 @@ QLabel#qaCountLabel {
     padding: 2px 0 4px 0;
 }
 
+QLabel#infoCustomerLabel {
+    font-size: 11px;
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+QLabel#infoOutsourceLabel {
+    font-size: 11px;
+    color: #fcd34d;
+    font-weight: 600;
+}
+
 QLineEdit {
     background-color: #142232;
     border: 1.5px solid #1e3a52;

@@ -279,14 +279,21 @@ class BluebookDetailWidget(QWidget):
             desc.setObjectName("panelTitle")
             info_layout.addWidget(desc)
         customers_text = ", ".join(self.bluebook.customer_names) or "No customers linked"
-        info_parts = [f'<span style="color: #2a02a3;">Customer: {customers_text}</span>']
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
+        customer_label = QLabel(f"Customer: {customers_text}")
+        customer_label.setObjectName("infoCustomerLabel")
+        info_row.addWidget(customer_label)
         if self.bluebook.outsource_names:
             outsource_text = ", ".join(self.bluebook.outsource_names)
-            info_parts.append(f'<span style="color: #f9e2af;">Outsource: {outsource_text}</span>')
-        info_label = QLabel("  |  ".join(info_parts))
-        info_label.setObjectName("panelCaption")
-        info_label.setTextFormat(Qt.RichText)
-        info_layout.addWidget(info_label)
+            separator = QLabel("|")
+            separator.setObjectName("panelCaption")
+            info_row.addWidget(separator)
+            outsource_label = QLabel(f"Outsource: {outsource_text}")
+            outsource_label.setObjectName("infoOutsourceLabel")
+            info_row.addWidget(outsource_label)
+        info_row.addStretch()
+        info_layout.addLayout(info_row)
         main_layout.addWidget(info_card)
 
         main_splitter = QSplitter(Qt.Horizontal)

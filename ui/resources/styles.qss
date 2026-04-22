@@ -71,6 +71,18 @@ QLabel#panelCaption {
     color: #a6adc8;
 }
 
+QLabel#infoCustomerLabel {
+    font-size: 11px;
+    color: #89b4fa;
+    font-weight: 600;
+}
+
+QLabel#infoOutsourceLabel {
+    font-size: 11px;
+    color: #f9e2af;
+    font-weight: 600;
+}
+
 QLabel#infoPill {
     background-color: #313244;
     border: 1px solid #45475a;
