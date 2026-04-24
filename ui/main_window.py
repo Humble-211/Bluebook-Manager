@@ -7,6 +7,7 @@ and navigation to the bluebook detail screen.
 
 import json
 import os
+import re
 
 from PySide6.QtCore import QByteArray, QMimeData, Qt, QTimer
 from PySide6.QtWidgets import (
@@ -31,6 +32,17 @@ from services import bluebook_service, customer_service, outsource_service
 from ui.bluebook_detail import BluebookDetailWidget
 from ui.customer_panel import CustomerPanel
 from ui.qa_window import QAWindow
+
+
+def _natural_sort_key(text: str):
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", text)]
+
+
+class NaturalSortTableItem(QTableWidgetItem):
+    """Table item that sorts die numbers in natural numeric order."""
+
+    def __lt__(self, other):
+        return _natural_sort_key(self.text()) < _natural_sort_key(other.text())
 
 
 class BluebookTable(QTableWidget):
@@ -112,6 +124,7 @@ class MainWindow(QMainWindow):
         self._theme_manager = theme_manager
 
         self._build_ui()
+        self._load_bluebooks()
         self.statusBar().showMessage("Search or select a customer to view bluebooks")
 
         from PySide6.QtGui import QKeySequence, QShortcut
@@ -295,13 +308,6 @@ class MainWindow(QMainWindow):
             search_description = True
             raw = raw[5:].strip()
 
-        if not raw and not self.current_customer_id:
-            self.bluebook_table.setRowCount(0)
-            self.results_summary.setText("Use search or the customer list to load results.")
-            self.statusBar().showMessage("Search or select a customer to view bluebooks")
-            self._update_table_action_state()
-            return
-
         terms = [t.strip() for t in raw.split(",") if t.strip()]
 
         if len(terms) <= 1:
@@ -310,6 +316,7 @@ class MainWindow(QMainWindow):
                 search=search,
                 customer_id=self.current_customer_id,
                 search_description=search_description,
+                limit=0,
             )
         else:
             seen = set()
@@ -319,6 +326,7 @@ class MainWindow(QMainWindow):
                     search=term,
                     customer_id=self.current_customer_id,
                     search_description=search_description,
+                    limit=0,
                 )
                 for bb in results:
                     if bb.id not in seen:
@@ -335,7 +343,7 @@ class MainWindow(QMainWindow):
         self.bluebook_table.setRowCount(len(bluebooks))
 
         for row, bb in enumerate(bluebooks):
-            self.bluebook_table.setItem(row, 0, QTableWidgetItem(bb.die_number))
+            self.bluebook_table.setItem(row, 0, NaturalSortTableItem(bb.die_number))
             self.bluebook_table.setItem(row, 1, QTableWidgetItem(bb.description or ""))
             self.bluebook_table.setItem(row, 2, QTableWidgetItem(", ".join(bb.customer_names)))
             self.bluebook_table.setItem(row, 3, QTableWidgetItem(", ".join(bb.outsource_names)))
@@ -347,21 +355,15 @@ class MainWindow(QMainWindow):
         self._update_table_action_state()
 
         mode_label = " (by description)" if search_description else ""
-        if len(bluebooks) >= 200:
+        if bluebooks:
             self.results_summary.setText(
-                f"Showing the first 200 results{mode_label}. Refine the search to narrow it down."
+                f"{len(bluebooks)} bluebook(s) loaded{mode_label}. Double-click a row or use Open Selected."
             )
-            self.statusBar().showMessage(f"Showing first 200 bluebooks{mode_label} - use search to find more")
         else:
-            if bluebooks:
-                self.results_summary.setText(
-                    f"{len(bluebooks)} bluebook(s) loaded{mode_label}. Double-click a row or use Open Selected."
-                )
-            else:
-                self.results_summary.setText(
-                    "No bluebooks matched the current search. Try a different die number, description, or customer."
-                )
-            self.statusBar().showMessage(f"{len(bluebooks)} bluebook(s) found{mode_label}")
+            self.results_summary.setText(
+                "No bluebooks matched the current search. Try a different die number, description, or customer."
+            )
+        self.statusBar().showMessage(f"{len(bluebooks)} bluebook(s) found{mode_label}")
 
     def _open_selected_bluebook(self):
         row = self.bluebook_table.currentRow()
@@ -373,7 +375,7 @@ class MainWindow(QMainWindow):
 
     def _show_detail(self, bluebook_id):
         detail = BluebookDetailWidget(bluebook_id)
-        detail.closed.connect(self._return_to_main)
+        detail.closed.connect(lambda: self._return_to_main(bluebook_id))
 
         while self.stack.count() > 1:
             w = self.stack.widget(1)
@@ -383,25 +385,35 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(detail)
         self.stack.setCurrentIndex(1)
 
-    def _return_to_main(self):
+    def _return_to_main(self, bluebook_id=None):
         self.stack.setCurrentIndex(0)
-
-        self.customer_panel.blockSignals(True)
-        self.customer_panel.refresh()
-        self.customer_panel.set_selected_customer(self.current_customer_id)
-        self.customer_panel.blockSignals(False)
 
         if self.current_customer_id:
             c = customer_service.get_customer(self.current_customer_id)
             self.filter_label.setText(f"Showing bluebooks for: {c.name}" if c else "")
         else:
             self.filter_label.setText("Search or select a customer to start browsing.")
-        self._load_bluebooks()
+        if bluebook_id is not None:
+            self._refresh_file_count_for_bluebook(bluebook_id)
 
         while self.stack.count() > 1:
             w = self.stack.widget(1)
             self.stack.removeWidget(w)
             w.deleteLater()
+
+    def _refresh_file_count_for_bluebook(self, bluebook_id):
+        from dal import dal
+
+        file_counts = dal.get_file_counts_batch([bluebook_id])
+        for row in range(self.bluebook_table.rowCount()):
+            item = self.bluebook_table.item(row, 0)
+            if item and item.data(Qt.UserRole) == bluebook_id:
+                self.bluebook_table.setItem(
+                    row,
+                    4,
+                    QTableWidgetItem(str(file_counts.get(bluebook_id, 0))),
+                )
+                break
 
     def _theme_label(self) -> str:
         if not self._theme_manager:

@@ -219,7 +219,6 @@ def list_bluebooks(search: str = "", customer_id: Optional[int] = None,
     """
     conn = get_connection()
 
-    query = "SELECT DISTINCT b.* FROM bluebooks b"
     joins = []
     where_clauses = []
     params: list = []
@@ -243,13 +242,30 @@ def list_bluebooks(search: str = "", customer_id: Optional[int] = None,
                 where_clauses.append("b.die_number LIKE ?")
             params.append(f"%{search}%")
 
-    sql = query
+    needs_distinct = bool(search_qa)
+    select_clause = "SELECT DISTINCT b.*" if needs_distinct else "SELECT b.*"
+    sql = f"{select_clause} FROM bluebooks b"
     if joins:
         sql += " " + " ".join(joins)
     if where_clauses:
         sql += " WHERE " + " AND ".join(where_clauses)
         
-    sql += " ORDER BY b.die_number"
+    sql += """
+        ORDER BY
+            CASE
+                WHEN b.die_number GLOB '[0-9]*'
+                 AND b.die_number NOT GLOB '*[^0-9]*'
+                THEN 0
+                ELSE 1
+            END,
+            CASE
+                WHEN b.die_number GLOB '[0-9]*'
+                 AND b.die_number NOT GLOB '*[^0-9]*'
+                THEN CAST(b.die_number AS INTEGER)
+                ELSE NULL
+            END,
+            b.die_number
+    """
     if limit:
         sql += f" LIMIT {limit}"
 
