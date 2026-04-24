@@ -11,10 +11,10 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication, QSplashScreen
-from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
+from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QIcon
 from PySide6.QtCore import Qt
 
-from config import BUNDLE_DIR
+from config import LOGO_PATH
 from dal.database import init_db
 from services.log_service import setup_logging
 
@@ -64,6 +64,16 @@ def _make_splash_pixmap() -> QPixmap:
 
 def main():
     """Application entry point."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "BluebookManager.BluebookManager"
+            )
+        except Exception:
+            pass
+
     # Initialize logging
     setup_logging()
 
@@ -73,6 +83,9 @@ def main():
     # Create Qt application
     app = QApplication(sys.argv)
     app.setApplicationName("Bluebook Manager")
+    app_icon = QIcon(LOGO_PATH)
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
 
     # Show splash immediately — user sees feedback within ~1 s instead of a blank void
     splash = QSplashScreen(_make_splash_pixmap(), Qt.WindowStaysOnTopHint)
@@ -102,6 +115,8 @@ def main():
     # Launch main window
     from ui.main_window import MainWindow
     window = MainWindow(theme_manager=theme_manager)
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     window.show()
 
     # Dismiss splash once the main window is painted

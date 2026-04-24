@@ -7,6 +7,8 @@ a = Analysis(
     binaries=[],
     datas=[
         ('templates', 'templates'),
+        ('resources/logo.png', 'resources'),
+        ('resources/logo.ico', 'resources'),
         ('ui/resources/styles.qss', 'ui/resources'),
         ('ui/resources/theme_midnight.qss', 'ui/resources'),
         ('ui/resources/theme_oceanic.qss', 'ui/resources'),
@@ -50,6 +52,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='resources/logo.ico',
 )
 coll = COLLECT(
     exe,
