@@ -9,7 +9,7 @@ import json
 import os
 import re
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt, QTimer
+from PySide6.QtCore import QByteArray, QMimeData, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,6 +33,64 @@ from ui.bluebook_detail import BluebookDetailWidget
 from ui.customer_panel import CustomerPanel
 from ui.qa_window import QAWindow
 
+_BLUEBOOK_CHUNK_SIZE = 25
+
+
+class _BluebookLoaderThread(QThread):
+    """Run bluebook search and related count queries outside the UI thread."""
+
+    results_ready = Signal(object)
+    load_failed = Signal(int, str)
+
+    def __init__(self, load_id: int, raw_search: str, customer_id, parent=None):
+        super().__init__(parent)
+        self._load_id = load_id
+        self._raw_search = raw_search
+        self._customer_id = customer_id
+
+    def run(self):
+        try:
+            raw = self._raw_search.strip()
+            search_description = False
+            if raw.lower().startswith("desc "):
+                search_description = True
+                raw = raw[5:].strip()
+
+            terms = [term.strip() for term in raw.split(",") if term.strip()]
+            if len(terms) <= 1:
+                search = terms[0] if terms else ""
+                bluebooks = bluebook_service.search_bluebooks(
+                    search=search,
+                    customer_id=self._customer_id,
+                    search_description=search_description,
+                    limit=0,
+                )
+            else:
+                seen = set()
+                bluebooks = []
+                for term in terms:
+                    results = bluebook_service.search_bluebooks(
+                        search=term,
+                        customer_id=self._customer_id,
+                        search_description=search_description,
+                        limit=0,
+                    )
+                    for bluebook in results:
+                        if bluebook.id not in seen:
+                            seen.add(bluebook.id)
+                            bluebooks.append(bluebook)
+
+            from dal import dal
+
+            file_counts = dal.get_file_counts_batch(
+                [bluebook.id for bluebook in bluebooks]
+            )
+            mode_label = " (by description)" if search_description else ""
+            self.results_ready.emit(
+                (self._load_id, bluebooks, file_counts, mode_label)
+            )
+        except Exception as exc:
+            self.load_failed.emit(self._load_id, str(exc))
 
 def _natural_sort_key(text: str):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", text)]
@@ -122,10 +180,13 @@ class MainWindow(QMainWindow):
         self.current_customer_id = None
         self._qa_window: QAWindow | None = None
         self._theme_manager = theme_manager
+        self._bluebook_loader: _BluebookLoaderThread | None = None
+        self._pending_bluebook_load = None
+        self._bluebook_load_id = 0
 
         self._build_ui()
+        self.statusBar().showMessage("Loading bluebooks...")
         self._load_bluebooks()
-        self.statusBar().showMessage("Search or select a customer to view bluebooks")
 
         from PySide6.QtGui import QKeySequence, QShortcut
 
@@ -246,6 +307,7 @@ class MainWindow(QMainWindow):
         self.bluebook_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.bluebook_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.bluebook_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.bluebook_table.horizontalHeader().setResizeContentsPrecision(50)
         self.bluebook_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.bluebook_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.bluebook_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -284,7 +346,7 @@ class MainWindow(QMainWindow):
             self.search_input.setPlaceholderText(
                 "Search by die number (use commas for multiple) or prefix with 'desc ' for descriptions"
             )
-        self._search_timer.start(150)
+        self._search_timer.start(300)
 
     def _do_search(self):
         self._load_bluebooks()
@@ -301,70 +363,136 @@ class MainWindow(QMainWindow):
         self._load_bluebooks()
 
     def _load_bluebooks(self):
-        raw = self.search_input.text().strip()
+        """Queue the latest search without blocking the Qt event loop."""
+        self._bluebook_load_id += 1
+        load_id = self._bluebook_load_id
+        raw_search = self.search_input.text().strip()
+        self._pending_bluebook_load = (
+            load_id,
+            raw_search,
+            self.current_customer_id,
+        )
+        self.results_summary.setText("Loading bluebooks...")
+        self.statusBar().showMessage("Searching bluebooks...")
 
-        search_description = False
-        if raw.lower().startswith("desc "):
-            search_description = True
-            raw = raw[5:].strip()
+        if self._bluebook_loader is None:
+            self._start_pending_bluebook_load()
 
-        terms = [t.strip() for t in raw.split(",") if t.strip()]
+    def _start_pending_bluebook_load(self):
+        if self._pending_bluebook_load is None:
+            return
+        load_id, raw_search, customer_id = self._pending_bluebook_load
+        self._pending_bluebook_load = None
 
-        if len(terms) <= 1:
-            search = terms[0] if terms else ""
-            bluebooks = bluebook_service.search_bluebooks(
-                search=search,
-                customer_id=self.current_customer_id,
-                search_description=search_description,
-                limit=0,
+        loader = _BluebookLoaderThread(
+            load_id, raw_search, customer_id, parent=self
+        )
+        self._bluebook_loader = loader
+        loader.results_ready.connect(self._on_bluebook_results_ready)
+        loader.load_failed.connect(self._on_bluebook_load_failed)
+        loader.finished.connect(
+            lambda active_loader=loader: self._on_bluebook_loader_finished(
+                active_loader
             )
-        else:
-            seen = set()
-            bluebooks = []
-            for term in terms:
-                results = bluebook_service.search_bluebooks(
-                    search=term,
-                    customer_id=self.current_customer_id,
-                    search_description=search_description,
-                    limit=0,
-                )
-                for bb in results:
-                    if bb.id not in seen:
-                        seen.add(bb.id)
-                        bluebooks.append(bb)
+        )
+        loader.start()
 
-        from dal import dal
+    def _on_bluebook_loader_finished(self, loader: _BluebookLoaderThread):
+        if self._bluebook_loader is loader:
+            self._bluebook_loader = None
+        loader.deleteLater()
+        if self._pending_bluebook_load is not None:
+            QTimer.singleShot(0, self._start_pending_bluebook_load)
 
-        bb_ids = [bb.id for bb in bluebooks]
-        file_counts = dal.get_file_counts_batch(bb_ids)
+    def _on_bluebook_load_failed(self, load_id: int, error_message: str):
+        if load_id != self._bluebook_load_id:
+            return
+        self.bluebook_table.setUpdatesEnabled(True)
+        self.results_summary.setText(f"Could not load bluebooks: {error_message}")
+        self.statusBar().showMessage("Bluebook search failed")
 
+    def _on_bluebook_results_ready(self, payload):
+        load_id, bluebooks, file_counts, mode_label = payload
+        if load_id != self._bluebook_load_id:
+            return
+        self._populate_bluebooks_chunked(
+            load_id, bluebooks, file_counts, mode_label
+        )
+
+    def _populate_bluebooks_chunked(
+        self,
+        load_id: int,
+        bluebooks: list,
+        file_counts: dict,
+        mode_label: str,
+    ):
+        """Insert a small number of table rows per event-loop turn."""
+        total = len(bluebooks)
         self.bluebook_table.setUpdatesEnabled(False)
         self.bluebook_table.setSortingEnabled(False)
-        self.bluebook_table.setRowCount(len(bluebooks))
-
-        for row, bb in enumerate(bluebooks):
-            self.bluebook_table.setItem(row, 0, NaturalSortTableItem(bb.die_number))
-            self.bluebook_table.setItem(row, 1, QTableWidgetItem(bb.description or ""))
-            self.bluebook_table.setItem(row, 2, QTableWidgetItem(", ".join(bb.customer_names)))
-            self.bluebook_table.setItem(row, 3, QTableWidgetItem(", ".join(bb.outsource_names)))
-            self.bluebook_table.setItem(row, 4, QTableWidgetItem(str(file_counts.get(bb.id, 0))))
-            self.bluebook_table.item(row, 0).setData(Qt.UserRole, bb.id)
-
-        self.bluebook_table.setSortingEnabled(True)
+        self.bluebook_table.clearContents()
+        self.bluebook_table.setRowCount(total)
+        # Paint each completed chunk instead of one expensive layout at the end.
         self.bluebook_table.setUpdatesEnabled(True)
-        self._update_table_action_state()
 
-        mode_label = " (by description)" if search_description else ""
-        if bluebooks:
-            self.results_summary.setText(
-                f"{len(bluebooks)} bluebook(s) loaded{mode_label}. Double-click a row or use Open Selected."
-            )
-        else:
-            self.results_summary.setText(
-                "No bluebooks matched the current search. Try a different die number, description, or customer."
-            )
-        self.statusBar().showMessage(f"{len(bluebooks)} bluebook(s) found{mode_label}")
+        def insert_chunk(start: int):
+            if load_id != self._bluebook_load_id:
+                self.bluebook_table.setUpdatesEnabled(True)
+                return
 
+            end = min(start + _BLUEBOOK_CHUNK_SIZE, total)
+            for row in range(start, end):
+                bluebook = bluebooks[row]
+                die_item = NaturalSortTableItem(bluebook.die_number)
+                die_item.setData(Qt.UserRole, bluebook.id)
+                self.bluebook_table.setItem(row, 0, die_item)
+                self.bluebook_table.setItem(
+                    row, 1, QTableWidgetItem(bluebook.description or "")
+                )
+                self.bluebook_table.setItem(
+                    row, 2, QTableWidgetItem(", ".join(bluebook.customer_names))
+                )
+                self.bluebook_table.setItem(
+                    row, 3, QTableWidgetItem(", ".join(bluebook.outsource_names))
+                )
+                self.bluebook_table.setItem(
+                    row,
+                    4,
+                    QTableWidgetItem(str(file_counts.get(bluebook.id, 0))),
+                )
+
+            if end < total:
+                self.results_summary.setText(
+                    f"Loading bluebooks... ({end}/{total})"
+                )
+                QTimer.singleShot(2, lambda: insert_chunk(end))
+                return
+
+            self.bluebook_table.setSortingEnabled(True)
+            self.bluebook_table.setUpdatesEnabled(True)
+            self._update_table_action_state()
+            if bluebooks:
+                self.results_summary.setText(
+                    f"{total} bluebook(s) loaded{mode_label}. "
+                    "Double-click a row or use Open Selected."
+                )
+            else:
+                self.results_summary.setText(
+                    "No bluebooks matched the current search. Try a different "
+                    "die number, description, or customer."
+                )
+            self.statusBar().showMessage(
+                f"{total} bluebook(s) found{mode_label}"
+            )
+
+        insert_chunk(0)
+
+    def closeEvent(self, event):
+        self._pending_bluebook_load = None
+        loader = self._bluebook_loader
+        if loader is not None and loader.isRunning():
+            loader.wait(5000)
+        super().closeEvent(event)
     def _open_selected_bluebook(self):
         row = self.bluebook_table.currentRow()
         if row < 0:

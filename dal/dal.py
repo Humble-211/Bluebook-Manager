@@ -65,6 +65,50 @@ def list_customers() -> list[Customer]:
                      created_at=r["created_at"]) for r in rows]
 
 
+def get_customer_sharing_info(search: str = "") -> list[dict]:
+    """Get all customers and their associated bluebooks in a single query."""
+    conn = get_connection()
+    query = """
+        SELECT c.id as customer_id, c.name as customer_name,
+               b.id as bluebook_id, b.die_number
+        FROM customers c
+        LEFT JOIN customer_bluebooks cb ON c.id = cb.customer_id
+        LEFT JOIN bluebooks b ON cb.bluebook_id = b.id
+    """
+    params = []
+    if search:
+        query += " WHERE c.name LIKE ?"
+        params.append(f"%{search}%")
+    query += " ORDER BY c.name, b.die_number"
+    
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    
+    # Group by customer
+    from collections import defaultdict
+    customer_map = {}
+    customer_bbs = defaultdict(list)
+    
+    for r in rows:
+        cid = r["customer_id"]
+        customer_map[cid] = r["customer_name"]
+        if r["bluebook_id"] is not None:
+            customer_bbs[cid].append({
+                "id": r["bluebook_id"],
+                "die_number": r["die_number"]
+            })
+            
+    result = []
+    for cid in sorted(customer_map.keys(), key=lambda k: customer_map[k]):
+        result.append({
+            "id": cid,
+            "name": customer_map[cid],
+            "bluebooks": customer_bbs[cid]
+        })
+    return result
+
+
+
 def update_customer(customer_id: int, name: str, contact_info: str = ""):
     conn = get_connection()
     conn.execute(
@@ -684,6 +728,21 @@ def add_shared_file(original_file_id: int, linked_bluebook_id: int) -> int:
     sid = cur.lastrowid
     conn.close()
     return sid
+
+
+def add_shared_files(original_file_id: int, linked_bluebook_ids: list[int]):
+    """Share a file to multiple bluebooks in a single transaction."""
+    conn = get_connection()
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO shared_files_map (original_file_id, linked_bluebook_id) "
+            "VALUES (?, ?)",
+            [(original_file_id, lid) for lid in linked_bluebook_ids]
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 
 def remove_shared_file(original_file_id: int, linked_bluebook_id: int):

@@ -11,10 +11,10 @@ from dal.models import Bluebook, BluebookFile
 from services.log_service import log
 
 
-def _append_die_to_docx(file_path: str, target_die_number: str):
-    """Append a target die number to 'Die:' patterns inside a DOCX file.
+def _append_dies_to_docx(file_path: str, target_die_numbers: list[str]):
+    """Append target die numbers to 'Die:' patterns inside a DOCX file.
 
-    For example, 'Die: 12345' becomes 'Die: 12345-67890'.
+    For example, 'Die: 12345' becomes 'Die: 12345-67890-54321'.
     Works across paragraphs and table cells.
     """
     abs_path = os.path.join(STORAGE_ROOT, file_path)
@@ -28,13 +28,17 @@ def _append_die_to_docx(file_path: str, target_die_number: str):
         pattern = re.compile(r'(Die:\s*[\w\-]+)')
 
         def update_text(text):
-            """Append target die number to Die: patterns if not already present."""
+            """Append target die numbers to Die: patterns if not already present."""
             def replacer(match):
                 current = match.group(1)
-                # Check if target die is already appended
-                if target_die_number in current:
-                    return current
-                return f"{current}-{target_die_number}"
+                # Find which target dies are not already in the current match
+                new_parts = []
+                for die in target_die_numbers:
+                    if die not in current:
+                        new_parts.append(die)
+                if new_parts:
+                    return f"{current}-" + "-".join(new_parts)
+                return current
             return pattern.sub(replacer, text)
 
         modified = False
@@ -61,7 +65,7 @@ def _append_die_to_docx(file_path: str, target_die_number: str):
         if modified:
             doc.save(abs_path)
             log("SHARE_FILE_DOCX_UPDATE",
-                f"Appended Die# {target_die_number} to {file_path}")
+                f"Appended Die numbers {target_die_numbers} to {file_path}")
 
     except Exception as e:
         log("SHARE_FILE_DOCX_ERROR",
@@ -79,7 +83,8 @@ def share_file(file_id: int, target_bluebook_ids: list[int]):
                          f"Only {SHAREABLE_SECTIONS} can be shared.")
 
     source_bb = dal.get_bluebook(bf.bluebook_id)
-    shared_count = 0
+    valid_target_ids = []
+    target_die_numbers = []
 
     for target_id in target_bluebook_ids:
         # Don't share to the file's own bluebook
@@ -88,17 +93,25 @@ def share_file(file_id: int, target_bluebook_ids: list[int]):
         target_bb = dal.get_bluebook(target_id)
         if not target_bb:
             continue
-        dal.add_shared_file(file_id, target_id)
-        shared_count += 1
+        valid_target_ids.append(target_id)
+        target_die_numbers.append(target_bb.die_number)
 
-        # Update DOCX content with target die number
-        _append_die_to_docx(bf.file_path, target_bb.die_number)
+    if not valid_target_ids:
+        return 0
 
+    # Batch add to database
+    dal.add_shared_files(file_id, valid_target_ids)
+
+    # Batch update DOCX content
+    _append_dies_to_docx(bf.file_path, target_die_numbers)
+
+    for die_num in target_die_numbers:
         log("SHARE_FILE",
             f"File '{bf.file_path}' from Die# {source_bb.die_number} "
-            f"shared to Die# {target_bb.die_number}")
+            f"shared to Die# {die_num}")
 
-    return shared_count
+    return len(valid_target_ids)
+
 
 
 def unshare_file_from_bluebook(file_id: int, bluebook_id: int):

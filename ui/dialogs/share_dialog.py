@@ -131,10 +131,8 @@ class ShareDialog(QDialog):
 
         if text_lower.startswith("cust"):
             search_part = text_lower[4:].lstrip(": ")
-            customers = dal.list_customers()
-            if search_part:
-                customers = [c for c in customers if search_part in c.name.lower()]
-            self._populate_customer_list(customers)
+            customers_info = dal.get_customer_sharing_info(search_part)
+            self._populate_customer_list(customers_info)
         else:
             # Query DB with the typed die number fragment
             bluebooks = dal.list_bluebooks(search=text_lower, limit=200)
@@ -147,38 +145,44 @@ class ShareDialog(QDialog):
         for bb in bluebooks:
             if bb.id == self.source_bluebook_id:
                 continue  # Skip the source bluebook
-            item = QListWidgetItem()
             customers_str = ", ".join(bb.customer_names) if bb.customer_names else "No customer"
-            checkbox = QCheckBox(f"Die# {bb.die_number}  —  {customers_str}")
-            checkbox.setProperty("bluebook_id", bb.id)
-
-            if bb.id in self.already_shared_ids:
-                checkbox.setChecked(True)
-                checkbox.setEnabled(False)
-                checkbox.setText(checkbox.text() + "  [already shared]")
-
+            text = f"Die# {bb.die_number}  —  {customers_str}"
+            
+            is_already_shared = bb.id in self.already_shared_ids
+            if is_already_shared:
+                text += "  [already shared]"
+                
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, bb.id)
+            
+            if is_already_shared:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                
             self.bluebook_list.addItem(item)
-            self.bluebook_list.setItemWidget(item, checkbox)
 
-    def _populate_customer_list(self, customers):
+    def _populate_customer_list(self, customers_info):
         """Populate the list with customers (each resolves to all their bluebooks)."""
         self.bluebook_list.clear()
-        for cust in customers:
-            bbs = dal.get_bluebooks_for_customer(cust.id)
+        for cust in customers_info:
             # Filter out source bluebook
-            target_ids = [bb.id for bb in bbs if bb.id != self.source_bluebook_id]
+            target_ids = [bb["id"] for bb in cust["bluebooks"] if bb["id"] != self.source_bluebook_id]
             if not target_ids:
                 continue
 
-            die_numbers = ", ".join(bb.die_number for bb in bbs
-                                     if bb.id != self.source_bluebook_id)
-            item = QListWidgetItem()
-            checkbox = QCheckBox(
-                f"👤 {cust.name}  —  {len(target_ids)} bluebook(s): {die_numbers}")
-            checkbox.setProperty("bluebook_ids", target_ids)
+            die_numbers = ", ".join(bb["die_number"] for bb in cust["bluebooks"]
+                                     if bb["id"] != self.source_bluebook_id)
+            
+            text = f"👤 {cust['name']}  —  {len(target_ids)} bluebook(s): {die_numbers}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, target_ids)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
 
             self.bluebook_list.addItem(item)
-            self.bluebook_list.setItemWidget(item, checkbox)
 
     # ── Share action ─────────────────────────────────────────────────────────
 
@@ -187,24 +191,24 @@ class ShareDialog(QDialog):
 
         for i in range(self.bluebook_list.count()):
             item = self.bluebook_list.item(i)
-            widget = self.bluebook_list.itemWidget(item)
-            if not isinstance(widget, QCheckBox) or not widget.isChecked():
+            if item.checkState() != Qt.Checked:
                 continue
-            if not widget.isEnabled():
+            if not (item.flags() & Qt.ItemIsEnabled):
                 continue
 
             if self._customer_mode:
-                # Customer mode: each checkbox holds a list of bluebook IDs
-                bb_ids = widget.property("bluebook_ids")
+                # Customer mode: each item holds a list of bluebook IDs in UserRole
+                bb_ids = item.data(Qt.UserRole)
                 if bb_ids:
                     for bid in bb_ids:
                         if bid not in self.selected_bluebook_ids \
                                 and bid not in self.already_shared_ids:
                             self.selected_bluebook_ids.append(bid)
             else:
-                # Normal mode: each checkbox holds a single bluebook ID
-                bid = widget.property("bluebook_id")
-                self.selected_bluebook_ids.append(bid)
+                # Normal mode: each item holds a single bluebook ID in UserRole
+                bid = item.data(Qt.UserRole)
+                if bid is not None:
+                    self.selected_bluebook_ids.append(bid)
 
         if not self.selected_bluebook_ids:
             QMessageBox.information(self, "No Selection",
@@ -212,3 +216,4 @@ class ShareDialog(QDialog):
             return
 
         self.accept()
+

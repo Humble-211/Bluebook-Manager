@@ -24,15 +24,23 @@ def resolve_shortcut(path: str) -> str:
     """If *path* is a .lnk shortcut, return its target; otherwise return *path* unchanged."""
     if not path.lower().endswith(".lnk"):
         return path
+    com_initialized = False
+    shell = None
+    shortcut = None
     try:
         pythoncom.CoInitialize()
+        com_initialized = True
         shell = win32com.client.Dispatch("WScript.Shell")
         shortcut = shell.CreateShortCut(path)
         target = shortcut.TargetPath
         return target if target else path
     except Exception:
         return path
-
+    finally:
+        shortcut = None
+        shell = None
+        if com_initialized:
+            pythoncom.CoUninitialize()
 
 def create_shortcut(shortcut_path: str, target_path: str):
     """Create a Windows .lnk shortcut at *shortcut_path* pointing to *target_path*."""

@@ -10,6 +10,13 @@ import os
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# DOCX previews run Word COM in a separate process. Handle that lightweight
+# worker mode before importing Qt or initializing the main application.
+if len(sys.argv) >= 4 and sys.argv[1] == "--word-preview-worker":
+    from services.word_preview_worker import convert_docx_to_pdf
+
+    sys.exit(convert_docx_to_pdf(sys.argv[2], sys.argv[3]))
+
 from PySide6.QtWidgets import QApplication, QSplashScreen
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QIcon
 from PySide6.QtCore import Qt

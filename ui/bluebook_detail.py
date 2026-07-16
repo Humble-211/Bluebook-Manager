@@ -3,12 +3,16 @@ Bluebook Manager - Bluebook Detail Screen.
 """
 
 import hashlib
+import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 
-from PySide6.QtCore import QSignalBlocker, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap, QTransform
+from PySide6.QtCore import QSize, QSignalBlocker, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QImage, QImageReader, QPixmap, QTransform
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget
 
 from config import SECTION_LABELS, SECTION_TYPES, SHAREABLE_SECTIONS, TEMPLATE_SECTIONS
@@ -20,6 +24,10 @@ from ui.dialogs.share_dialog import ShareDialog
 
 _DOCX_CACHE_DIR = os.path.join(tempfile.gettempdir(), "bluebook_docx_cache")
 os.makedirs(_DOCX_CACHE_DIR, exist_ok=True)
+_PREVIEW_MAX_HEIGHT = 1600
+_PREVIEW_TIMEOUT_MS = 15_000
+_DOCX_TIMEOUT_MS = 45_000
+logger = logging.getLogger(__name__)
 
 
 def _fitz_pixmap_to_qimage(pix) -> QImage:
@@ -45,88 +53,40 @@ def _fitz_pixmap_to_qimage(pix) -> QImage:
 
 
 class _WordCOMPool(QThread):
+    """Serialize Word conversions in an isolated child process.
+
+    Word COM failures can terminate the process that owns the COM proxy. Keeping
+    that proxy out of the Qt application prevents a bad document or dead Word
+    server from crashing the entire program.
+    """
+
     conversion_done = Signal(str, str)
     conversion_error = Signal(str, str)
 
     def __init__(self):
         super().__init__()
-        self._queue = []
+        self._request: tuple[str, str, str] | None = None
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._stop = False
-        self._word = None
+        self._process = None
 
     def request_conversion(self, request_id: str, docx_path: str, cache_path: str):
         with self._lock:
-            self._queue.append((request_id, docx_path, cache_path))
+            self._request = (request_id, docx_path, cache_path)
         self._event.set()
 
-    def shutdown(self):
-        self._stop = True
-        self._event.set()
-        self.wait(5000)
-
-    def run(self):
-        import pythoncom
-        import win32com.client
-
-        pythoncom.CoInitialize()
-        try:
-            self._word = win32com.client.DispatchEx("Word.Application")
-            self._word.Visible = False
-            self._word.DisplayAlerts = 0
-        except Exception:
-            self._word = None
-        while not self._stop:
-            self._event.wait()
-            self._event.clear()
-            while True:
-                with self._lock:
-                    if not self._queue:
-                        break
-                    req_id, docx_path, cache_path = self._queue.pop(0)
-                if self._word is None:
-                    self.conversion_error.emit(req_id, "Microsoft Word could not be started.")
-                    continue
-                try:
-                    doc = self._word.Documents.Open(os.path.abspath(docx_path), ReadOnly=True)
-                    doc.SaveAs(os.path.abspath(cache_path), FileFormat=17)
-                    doc.Close(False)
-                    self.conversion_done.emit(req_id, cache_path)
-                except Exception as e:
-                    self.conversion_error.emit(req_id, str(e))
-                    try:
-                        self._word = win32com.client.DispatchEx("Word.Application")
-                        self._word.Visible = False
-                        self._word.DisplayAlerts = 0
-                    except Exception:
-                        self._word = None
-        if self._word is not None:
-            try:
-                self._word.Quit()
-            except Exception:
-                pass
-        pythoncom.CoUninitialize()
-
-
-class _PreviewRenderPool(QThread):
-    render_done = Signal(str, object)
-    render_error = Signal(str, str)
-
-    def __init__(self):
-        super().__init__()
-        self._request: tuple[str, str] | None = None
-        self._lock = threading.Lock()
-        self._event = threading.Event()
-        self._stop = False
-
-    def request_render(self, request_id: str, pdf_path: str):
+    def cancel_pending(self, request_id: str | None = None):
         with self._lock:
-            self._request = (request_id, pdf_path)
-        self._event.set()
+            if request_id is None or (
+                self._request is not None and self._request[0] == request_id
+            ):
+                self._request = None
 
     def shutdown(self):
         self._stop = True
+        self.cancel_pending()
+        self._terminate_active_process()
         self._event.set()
         self.wait(5000)
 
@@ -134,32 +94,241 @@ class _PreviewRenderPool(QThread):
         while not self._stop:
             self._event.wait()
             self._event.clear()
-            while True:
+            while not self._stop:
                 with self._lock:
                     request = self._request
                     self._request = None
                 if request is None:
                     break
-                request_id, pdf_path = request
+                request_id, docx_path, cache_path = request
+                if os.path.isfile(cache_path):
+                    self.conversion_done.emit(request_id, cache_path)
+                    continue
+                self._convert(request_id, docx_path, cache_path)
+
+    def _worker_command(self, docx_path: str, output_path: str) -> list[str]:
+        if getattr(sys, "frozen", False):
+            return [
+                sys.executable,
+                "--word-preview-worker",
+                docx_path,
+                output_path,
+            ]
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return [
+            sys.executable,
+            os.path.join(project_root, "main.py"),
+            "--word-preview-worker",
+            docx_path,
+            output_path,
+        ]
+
+    def _convert(self, request_id: str, docx_path: str, cache_path: str):
+        temp_pdf = f"{cache_path}.{threading.get_ident()}.tmp.pdf"
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            process = subprocess.Popen(
+                self._worker_command(os.path.abspath(docx_path), temp_pdf),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=flags,
+            )
+            with self._lock:
+                self._process = process
+            try:
+                _, stderr = process.communicate(timeout=40)
+            except subprocess.TimeoutExpired:
+                self._terminate_process(process)
+                process.communicate()
+                raise TimeoutError(
+                    "Microsoft Word did not finish the preview within 40 seconds."
+                )
+            finally:
+                with self._lock:
+                    if self._process is process:
+                        self._process = None
+
+            if process.returncode != 0 or not os.path.isfile(temp_pdf):
+                message = (stderr or "Microsoft Word could not convert the document.").strip()
+                raise RuntimeError(message)
+            os.replace(temp_pdf, cache_path)
+            self.conversion_done.emit(request_id, cache_path)
+        except Exception as exc:
+            self.conversion_error.emit(request_id, str(exc))
+        finally:
+            try:
+                if os.path.isfile(temp_pdf):
+                    os.remove(temp_pdf)
+            except OSError:
+                pass
+
+    def _terminate_active_process(self):
+        with self._lock:
+            process = self._process
+        if process is not None:
+            self._terminate_process(process)
+
+    @staticmethod
+    def _terminate_process(process):
+        if process.poll() is not None:
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=5,
+                    check=False,
+                )
+            else:
+                process.kill()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+class _PreviewRenderPool(QThread):
+    render_done = Signal(str, object, str, int)
+    document_ready = Signal(str, str, str, int)
+    render_error = Signal(str, str, int)
+
+    def __init__(self):
+        super().__init__()
+        self._request: tuple[str, str, int] | None = None
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._stop = False
+
+    def request_render(self, request_id: str, source_path: str, max_width: int):
+        with self._lock:
+            # Coalesce rapid selection changes. An in-flight read may finish,
+            # but only the newest pending request is processed afterward.
+            self._request = (request_id, source_path, max_width)
+        self._event.set()
+
+    def cancel_pending(self, request_id: str | None = None):
+        with self._lock:
+            if request_id is None or (
+                self._request is not None and self._request[0] == request_id
+            ):
+                self._request = None
+
+    def shutdown(self):
+        self._stop = True
+        self.cancel_pending()
+        self._event.set()
+        self.wait(5000)
+
+    def run(self):
+        while not self._stop:
+            self._event.wait()
+            self._event.clear()
+            while not self._stop:
+                with self._lock:
+                    request = self._request
+                    self._request = None
+                if request is None:
+                    break
+                request_id, source_path, max_width = request
+                started = time.perf_counter()
                 try:
-                    import fitz
+                    self._prepare_preview(
+                        request_id, source_path, max_width, started
+                    )
+                except Exception as exc:
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+                    self.render_error.emit(request_id, str(exc), elapsed_ms)
 
-                    pdf_doc = fitz.open(pdf_path)
-                    try:
-                        if len(pdf_doc) == 0:
-                            self.render_error.emit(request_id, "PDF has no pages.")
-                            continue
-                        page = pdf_doc[0]
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35))
-                        img = _fitz_pixmap_to_qimage(pix)
-                    finally:
-                        pdf_doc.close()
-                    self.render_done.emit(request_id, img)
-                except ImportError:
-                    self.render_error.emit(request_id, "PDF preview requires PyMuPDF.\n\nUse Open to view the PDF.")
-                except Exception as e:
-                    self.render_error.emit(request_id, str(e))
+    def _prepare_preview(
+        self, request_id: str, source_path: str, max_width: int, started: float
+    ):
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError("File not found on disk.")
 
+        resolved_path = file_service.resolve_shortcut(source_path)
+        if source_path.lower().endswith(".lnk") and resolved_path == source_path:
+            raise FileNotFoundError("The shortcut target could not be resolved.")
+        if not os.path.isfile(resolved_path):
+            raise FileNotFoundError(
+                "Shortcut target not found. The network file may be unavailable, moved, or deleted."
+            )
+
+        ext = os.path.splitext(resolved_path)[1].lower()
+        max_width = max(320, min(int(max_width or 1000), 1600))
+        if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
+            image = self._read_scaled_image(resolved_path, max_width)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self.render_done.emit(request_id, image, "image", elapsed_ms)
+            return
+        if ext == ".pdf":
+            image = self._render_pdf_page(resolved_path, max_width)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self.render_done.emit(request_id, image, "pdf", elapsed_ms)
+            return
+        if ext == ".docx":
+            try:
+                mtime = os.path.getmtime(resolved_path)
+            except OSError:
+                mtime = 0
+            cache_key = hashlib.md5(
+                f"{resolved_path}|{mtime}".encode()
+            ).hexdigest()
+            cache_path = os.path.join(_DOCX_CACHE_DIR, f"{cache_key}.pdf")
+            if os.path.isfile(cache_path):
+                image = self._render_pdf_page(cache_path, max_width)
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                self.render_done.emit(request_id, image, "pdf", elapsed_ms)
+                return
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self.document_ready.emit(
+                request_id, resolved_path, cache_path, elapsed_ms
+            )
+            return
+        raise ValueError(f"No preview is available for {ext or 'this'} files.")
+
+    @staticmethod
+    def _read_scaled_image(path: str, max_width: int) -> QImage:
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        source_size = reader.size()
+        if source_size.isValid() and (
+            source_size.width() > max_width
+            or source_size.height() > _PREVIEW_MAX_HEIGHT
+        ):
+            reader.setScaledSize(
+                source_size.scaled(
+                    QSize(max_width, _PREVIEW_MAX_HEIGHT), Qt.KeepAspectRatio
+                )
+            )
+        image = reader.read()
+        if image.isNull():
+            raise ValueError(reader.errorString() or "Could not decode image.")
+        return image
+
+    @staticmethod
+    def _render_pdf_page(path: str, max_width: int) -> QImage:
+        try:
+            import fitz
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF preview requires PyMuPDF. Use Open to view the PDF."
+            ) from exc
+
+        pdf_doc = fitz.open(path)
+        try:
+            if len(pdf_doc) == 0:
+                raise ValueError("PDF has no pages.")
+            page = pdf_doc[0]
+            page_width = max(float(page.rect.width), 1.0)
+            zoom = max(0.8, min(2.0, max_width / page_width))
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            return _fitz_pixmap_to_qimage(pix)
+        finally:
+            pdf_doc.close()
 
 _word_pool: _WordCOMPool | None = None
 _preview_render_pool: _PreviewRenderPool | None = None
@@ -167,7 +336,9 @@ _preview_render_pool: _PreviewRenderPool | None = None
 
 def _get_word_pool() -> _WordCOMPool:
     global _word_pool
-    if _word_pool is None or not _word_pool.isRunning():
+    # isRunning() can remain false briefly after start(). Replacing the worker
+    # in that window destroys a live QThread and can abort the whole process.
+    if _word_pool is None or _word_pool.isFinished():
         _word_pool = _WordCOMPool()
         _word_pool.start()
     return _word_pool
@@ -175,7 +346,7 @@ def _get_word_pool() -> _WordCOMPool:
 
 def _get_preview_render_pool() -> _PreviewRenderPool:
     global _preview_render_pool
-    if _preview_render_pool is None or not _preview_render_pool.isRunning():
+    if _preview_render_pool is None or _preview_render_pool.isFinished():
         _preview_render_pool = _PreviewRenderPool()
         _preview_render_pool.start()
     return _preview_render_pool
@@ -227,6 +398,7 @@ class BluebookDetailWidget(QWidget):
         self.bluebook = bluebook_service.get_bluebook(bluebook_id)
         self.current_section = SECTION_TYPES[0]
         self._docx_request_id: str | None = None
+        self._docx_signals_connected = False
         self._preview_request_id: str | None = None
         self._preview_generation = 0
         self._selection_generation = 0
@@ -236,8 +408,10 @@ class BluebookDetailWidget(QWidget):
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._run_pending_preview)
+        self._preview_timeout_timer = QTimer(self)
+        self._preview_timeout_timer.setSingleShot(True)
+        self._preview_timeout_timer.timeout.connect(self._on_preview_timeout)
         self._build_ui()
-        self._connect_docx_preview_signals()
         self._connect_preview_render_signals()
         self.destroyed.connect(self._on_destroyed)
         self._load_sections()
@@ -497,55 +671,77 @@ class BluebookDetailWidget(QWidget):
         if not self._is_preview_request_current(selection_generation, bf):
             return
 
-        abs_path = file_service.get_absolute_path(bf.file_path)
-        if not os.path.isfile(abs_path):
-            self._show_preview_message("File not found on disk.")
-            return
-        abs_path = file_service.resolve_shortcut(abs_path)
-        if not os.path.isfile(abs_path):
-            self._show_preview_message("Shortcut target not found.\n\nThe file on the network drive may have been moved or deleted.")
-            return
-        try:
-            ext = os.path.splitext(abs_path)[1].lower()
-            if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
-                self._preview_image(abs_path, selection_generation)
-            elif ext == ".pdf":
-                self._preview_pdf(abs_path, selection_generation)
-            elif ext == ".docx":
-                self._preview_docx(abs_path, selection_generation)
-            else:
-                self._show_preview_message(f"No preview available for {ext} files.\n\nUse Open to view the file.")
-        except Exception as e:
-            self._show_preview_message(f"Could not load preview:\n{e}")
+        source_path = file_service.get_absolute_path(bf.file_path)
+        request_id = f"preview:{selection_generation}:{self._preview_generation}"
+        self._docx_request_id = None
+        self._preview_request_id = request_id
+        self._show_preview_message("Loading preview...")
+        self._arm_preview_timeout(_PREVIEW_TIMEOUT_MS)
+        _get_preview_render_pool().request_render(
+            request_id, source_path, self._current_preview_width()
+        )
 
     def _clear_preview(self):
         self._cancel_pending_docx_preview()
         self._rotation_angle = 0
         self._show_preview_message("Select a file to preview")
 
-    def _connect_docx_preview_signals(self):
+    def _connect_docx_preview_signals(self) -> _WordCOMPool:
         pool = _get_word_pool()
-        pool.conversion_done.connect(self._on_docx_ready)
-        pool.conversion_error.connect(self._on_docx_error)
+        if not self._docx_signals_connected:
+            pool.conversion_done.connect(self._on_docx_ready)
+            pool.conversion_error.connect(self._on_docx_error)
+            self._docx_signals_connected = True
+        return pool
 
     def _connect_preview_render_signals(self):
         pool = _get_preview_render_pool()
         pool.render_done.connect(self._on_preview_render_done)
+        pool.document_ready.connect(self._on_preview_document_ready)
         pool.render_error.connect(self._on_preview_render_error)
 
     def _cancel_pending_docx_preview(self):
+        pending_docx_request = self._docx_request_id
+        pending_preview_request = self._preview_request_id
         self._preview_generation += 1
         self._docx_request_id = None
         self._preview_request_id = None
         self._pending_preview_file = None
         self._preview_timer.stop()
+        self._preview_timeout_timer.stop()
+        if pending_docx_request is not None and _word_pool is not None:
+            _word_pool.cancel_pending(pending_docx_request)
+        if pending_preview_request is not None and _preview_render_pool is not None:
+            _preview_render_pool.cancel_pending(pending_preview_request)
 
     def _on_destroyed(self, *args):
         self._is_closing = True
-        self._docx_request_id = None
-        self._preview_request_id = None
-        self._pending_preview_file = None
-        self._preview_timer.stop()
+        self._cancel_pending_docx_preview()
+
+    def _arm_preview_timeout(self, timeout_ms: int):
+        self._preview_timeout_timer.start(timeout_ms)
+
+    def _on_preview_timeout(self):
+        if self._is_closing:
+            return
+        filename = self.preview_meta.text()
+        logger.warning("Preview timed out for %s", filename)
+        self._cancel_pending_docx_preview()
+        self._show_preview_message(
+            "Preview timed out. The network file or Microsoft Word may be unavailable.\n\n"
+            "You can keep using the program or use Open to try the file directly."
+        )
+
+    def _current_preview_width(self) -> int:
+        viewport_width = self.preview_scroll.viewport().width()
+        return max(600, min(viewport_width - 20, 1600))
+
+    @staticmethod
+    def _selection_from_request_id(request_id: str) -> int | None:
+        try:
+            return int(request_id.split(":", 2)[1])
+        except (IndexError, ValueError):
+            return None
 
     def _rotate_preview(self):
         self._rotation_angle = (self._rotation_angle + 90) % 360
@@ -588,85 +784,88 @@ class BluebookDetailWidget(QWidget):
             return getattr(current_bf, "id", None) == getattr(bf, "id", None)
         return current_bf is not None
 
-    def _preview_image(self, abs_path, selection_generation: int):
-        if not self._is_preview_request_current(selection_generation):
+    def _on_preview_document_ready(
+        self,
+        request_id: str,
+        docx_path: str,
+        cache_path: str,
+        elapsed_ms: int,
+    ):
+        if self._is_closing or request_id != self._preview_request_id:
             return
-        pixmap = QPixmap(abs_path)
-        if pixmap.isNull():
-            self._show_preview_message("Could not load image.")
+        selection_generation = self._selection_from_request_id(request_id)
+        if selection_generation is None or not self._is_preview_request_current(selection_generation):
             return
-        label = ScaledPixmapLabel(pixmap)
-        label.setStyleSheet("padding: 10px;")
-        if not self._is_preview_request_current(selection_generation):
-            label.deleteLater()
-            return
-        self._set_preview_widget(label)
-
-    def _preview_pdf(self, abs_path, selection_generation: int):
-        if not self._is_preview_request_current(selection_generation):
-            return
-        request_id = f"preview:{selection_generation}:{self._preview_generation}:{abs_path}"
-        self._preview_request_id = request_id
-        self._show_preview_message("Loading preview...")
-        _get_preview_render_pool().request_render(request_id, abs_path)
-
-    def _preview_docx(self, abs_path, selection_generation: int):
-        if not self._is_preview_request_current(selection_generation):
-            return
-        try:
-            mtime = os.path.getmtime(abs_path)
-        except OSError:
-            mtime = 0
-        cache_key = hashlib.md5(f"{abs_path}|{mtime}".encode()).hexdigest()
-        cache_path = os.path.join(_DOCX_CACHE_DIR, f"{cache_key}.pdf")
-        if os.path.isfile(cache_path):
-            self._render_pdf_preview(cache_path, selection_generation)
-            return
-        self._show_preview_message("Loading preview...")
-        request_id = f"{cache_key}:{self._preview_generation}:{selection_generation}"
+        logger.info("Preview source prepared in %d ms: %s", elapsed_ms, docx_path)
+        self._preview_request_id = None
         self._docx_request_id = request_id
-        _get_word_pool().request_conversion(request_id, abs_path, cache_path)
+        self._show_preview_message("Converting Word document...")
+        self._arm_preview_timeout(_DOCX_TIMEOUT_MS)
+        word_pool = self._connect_docx_preview_signals()
+        word_pool.request_conversion(request_id, docx_path, cache_path)
 
     def _on_docx_ready(self, request_id: str, pdf_path: str):
-        if self._is_closing or request_id != getattr(self, "_docx_request_id", None):
+        if self._is_closing or request_id != self._docx_request_id:
+            return
+        selection_generation = self._selection_from_request_id(request_id)
+        if selection_generation is None or not self._is_preview_request_current(selection_generation):
             return
         self._docx_request_id = None
-        try:
-            selection_generation = int(request_id.rsplit(":", 1)[1])
-        except (IndexError, ValueError):
-            selection_generation = self._selection_generation
-        self._render_pdf_preview(pdf_path, selection_generation)
+        self._preview_request_id = request_id
+        self._show_preview_message("Rendering preview...")
+        self._arm_preview_timeout(_PREVIEW_TIMEOUT_MS)
+        _get_preview_render_pool().request_render(
+            request_id, pdf_path, self._current_preview_width()
+        )
 
     def _on_docx_error(self, request_id: str, error_msg: str):
-        if self._is_closing or request_id != getattr(self, "_docx_request_id", None):
+        if self._is_closing or request_id != self._docx_request_id:
             return
         self._docx_request_id = None
-        self._show_preview_message(f"Could not convert DOCX to PDF:\n{error_msg}\n\nMake sure Microsoft Word is installed.")
+        self._preview_timeout_timer.stop()
+        logger.warning("DOCX preview failed for %s: %s", self.preview_meta.text(), error_msg)
+        self._show_preview_message(
+            f"Could not convert DOCX to PDF:\n{error_msg}\n\n"
+            "Make sure Microsoft Word is installed and the file is not blocked by a dialog."
+        )
 
-    def _render_pdf_preview(self, pdf_path: str, selection_generation: int):
-        if not self._is_preview_request_current(selection_generation):
-            return
-        self._preview_pdf(pdf_path, selection_generation)
-
-    def _on_preview_render_done(self, request_id: str, img):
+    def _on_preview_render_done(
+        self, request_id: str, image: QImage, preview_kind: str, elapsed_ms: int
+    ):
         if self._is_closing or request_id != self._preview_request_id:
             return
-        self._preview_request_id = None
-        try:
-            selection_generation = int(request_id.split(":", 3)[1])
-        except (IndexError, ValueError):
-            selection_generation = self._selection_generation
-        if not self._is_preview_request_current(selection_generation):
+        selection_generation = self._selection_from_request_id(request_id)
+        if selection_generation is None or not self._is_preview_request_current(selection_generation):
             return
-        label = ScaledPixmapLabel(QPixmap.fromImage(img))
-        label.setStyleSheet("background-color: white; border: 1px solid #45475a; padding: 2px;")
+        self._preview_request_id = None
+        self._preview_timeout_timer.stop()
+        logger.info(
+            "Preview rendered in %d ms (%s): %s",
+            elapsed_ms,
+            preview_kind,
+            self.preview_meta.text(),
+        )
+        label = ScaledPixmapLabel(QPixmap.fromImage(image))
+        if preview_kind == "pdf":
+            label.setStyleSheet("background-color: white; border: 1px solid #45475a; padding: 2px;")
+        else:
+            label.setStyleSheet("padding: 10px;")
         self._set_preview_widget(label)
 
-    def _on_preview_render_error(self, request_id: str, error_msg: str):
+    def _on_preview_render_error(
+        self, request_id: str, error_msg: str, elapsed_ms: int
+    ):
         if self._is_closing or request_id != self._preview_request_id:
             return
         self._preview_request_id = None
-        self._show_preview_message(f"Could not preview PDF:\n{error_msg}")
+        self._preview_timeout_timer.stop()
+        logger.warning(
+            "Preview failed after %d ms for %s: %s",
+            elapsed_ms,
+            self.preview_meta.text(),
+            error_msg,
+        )
+        self._show_preview_message(f"Could not load preview:\n{error_msg}")
 
     def _drag_enter_event(self, event):
         event.acceptProposedAction() if event.mimeData().hasUrls() else event.ignore()
